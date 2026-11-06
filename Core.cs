@@ -47,6 +47,8 @@ namespace CoastNotebook
         public DateTime? FinishedAt;
         public string VesselType = "";
         public string VesselName = "";
+        public string VesselNumber = "";
+        public bool IndependentMovement;
         public string Movement = "";
         public bool Complete;
         public List<Item> Items = new List<Item>();
@@ -58,19 +60,30 @@ namespace CoastNotebook
         }
         public string Describe()
         {
-            if (Category == "Vessel") return VesselType + " " + VesselName + " " + Movement;
+            if (Category == "Vessel") return (VesselType + " " + VesselName + " " + VesselNumber + " " + StateText()).Trim();
             List<string> parts = new List<string>();
             foreach (Item item in Items) parts.Add(item.ToString());
             return String.Join(", ", parts.ToArray());
         }
         public string StateText()
         {
-            return Category == "Vessel" ? Movement : Category == "Target"
+            return Category == "Vessel" ? (IndependentMovement ? Movement + "(기존)" : Complete ? "입항" : "출항중") : Category == "Target"
                 ? (Complete ? "철수" : "식별") : (Complete ? "완료" : "진행");
         }
         public string CategoryText()
         {
             return Category == "Vessel" ? "선박" : Category == "Target" ? "특이표적" : "일반/기존";
+        }
+        public string Report()
+        {
+            string text = Time.ToString("HHmm") + " " + (Category == "Vessel" ? "" : Camera + " ") + Title;
+            if (Azimuth.HasValue) text += " P:" + Azimuth.Value;
+            if (Elevation.HasValue) text += " T:" + Elevation.Value;
+            text += " " + Describe();
+            if (Category != "Vessel") text += " " + StateText();
+            if (FinishedAt.HasValue) text += " / " + (Category == "Vessel" ? "입항 " : "종료 ")
+                + FinishedAt.Value.ToString("MM-dd HH:mm");
+            return text.Trim();
         }
         public string Totals()
         {
@@ -103,12 +116,13 @@ namespace CoastNotebook
         public string Alarms = "";
         public string Cameras = "";
         public string Places = "";
+        public string Harbors = "";
         public string VesselTypes = "어선\r\n레저보트\r\n기타";
     }
 
     public class Book
     {
-        public int Version = 2;
+        public int Version = 3;
         public Settings Settings = new Settings();
         public List<Entry> Entries = new List<Entry>();
         public List<string> PendingDays = new List<string>();
@@ -117,9 +131,85 @@ namespace CoastNotebook
         public List<string> AlarmAcknowledgements = new List<string>();
     }
 
+    public class CameraSpec
+    {
+        public string Name = "";
+        public List<string> Places = new List<string>();
+    }
+
     public static class Data
     {
+        public const int CurrentVersion = 3;
         static readonly XmlSerializer Serializer = new XmlSerializer(typeof(Book));
+
+        public static List<string> Lines(string text)
+        {
+            List<string> result = new List<string>();
+            foreach (string raw in (text ?? "").Split('\n'))
+            { string line = raw.Trim(); if (line.Length > 0 && !result.Contains(line)) result.Add(line); }
+            return result;
+        }
+
+        public static List<CameraSpec> Cameras(Settings settings)
+        {
+            List<CameraSpec> result = new List<CameraSpec>();
+            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string line in Lines(settings.Cameras))
+            {
+                string[] parts = line.Split('|');
+                if (parts.Length > 2 || parts[0].Trim().Length == 0 || !names.Add(parts[0].Trim()))
+                    throw new FormatException("카메라는 한 줄에 카메라|장소1,장소2 형식이며 이름을 중복할 수 없습니다.");
+                CameraSpec spec = new CameraSpec(); spec.Name = parts[0].Trim();
+                string places = parts.Length == 2 ? parts[1].Replace(',', '\n') : settings.Places;
+                spec.Places.AddRange(Lines(places)); result.Add(spec);
+            }
+            return result;
+        }
+
+        public static int? OptionalAngle(string text, int min, int max)
+        {
+            if (String.IsNullOrWhiteSpace(text)) return null;
+            int number;
+            if (!Int32.TryParse(text.Trim(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out number)
+                || number < min || number > max)
+                throw new FormatException("각도는 " + min + "~" + max + "의 정수 또는 빈칸이어야 합니다.");
+            return number;
+        }
+
+        public static void Finish(Entry entry, DateTime at)
+        {
+            if (entry.Complete || entry.IndependentMovement) throw new InvalidOperationException("현재 기록은 종료 처리할 수 없습니다.");
+            if (at < entry.Time || at > DateTime.Now) throw new ArgumentException("처리 시각은 기록 시각 이후, 현재 시각 이하여야 합니다.");
+            entry.Complete = true; entry.FinishedAt = at;
+        }
+
+        public static void Reopen(Entry entry)
+        {
+            if (entry.Category == "Vessel" && entry.Movement != "출항")
+                throw new InvalidOperationException("단독 입항 기록에 출항 이력을 만들 수 없습니다.");
+            entry.Complete = false; entry.FinishedAt = null; entry.IndependentMovement = false;
+        }
+
+        public static string Statistics(IList<Entry> entries)
+        {
+            SortedDictionary<string, int> groups = new SortedDictionary<string, int>();
+            SortedDictionary<string, int> children = new SortedDictionary<string, int>();
+            foreach (Entry entry in entries)
+                foreach (Item item in entry.Items)
+                {
+                    string group = item.Name + " (" + item.Unit + ")";
+                    string child = item.Name + " > " + (item.SubName.Length == 0 ? "미분류/단일항목" : item.SubName) + " (" + item.Unit + ")";
+                    if (!groups.ContainsKey(group)) groups[group] = 0;
+                    if (!children.ContainsKey(child)) children[child] = 0;
+                    groups[group] += item.Count; children[child] += item.Count;
+                }
+            StringBuilder report = new StringBuilder("묶음 유형 합산\r\n");
+            foreach (KeyValuePair<string, int> group in groups) report.AppendLine(group.Key + ": " + group.Value);
+            report.AppendLine("\r\n세부유형별 집계");
+            foreach (KeyValuePair<string, int> child in children) report.AppendLine(child.Key + ": " + child.Value);
+            report.AppendLine("\r\n등록된 수량의 합계입니다. 고유 인원수나 실제 방문자 수를 의미하지 않습니다.");
+            return report.ToString();
+        }
 
         public static Book Clone(Book book)
         {
@@ -140,14 +230,21 @@ namespace CoastNotebook
             using (XmlReader reader = XmlReader.Create(path, options))
             {
                 Book book = (Book)Serializer.Deserialize(reader);
-                Validate(book);
+                NormalizeLegacy(book); Validate(book);
                 return book;
             }
         }
 
+        static void NormalizeLegacy(Book book)
+        {
+            if (book != null && book.Version < 3 && book.Entries != null)
+                foreach (Entry entry in book.Entries)
+                    if (entry != null && entry.Category == "Vessel") entry.IndependentMovement = true;
+        }
+
         public static void Validate(Book book)
         {
-            if (book == null || (book.Version != 1 && book.Version != 2) || book.Settings == null
+            if (book == null || (book.Version < 1 || book.Version > CurrentVersion) || book.Settings == null
                 || book.Entries == null || book.PendingDays == null
                 || book.AlarmAcknowledgements == null)
                 throw new InvalidDataException("지원하지 않거나 손상된 원본입니다.");
@@ -161,14 +258,17 @@ namespace CoastNotebook
                     || (entry.Azimuth.HasValue && (entry.Azimuth < 0 || entry.Azimuth > 6400))
                     || (entry.Elevation.HasValue && (entry.Elevation < -180 || entry.Elevation > 180))
                     || (entry.Category != "Manual" && entry.Category != "Target" && entry.Category != "Vessel")
-                    || entry.VesselType == null || entry.VesselName == null || entry.Movement == null
+                    || entry.VesselType == null || entry.VesselName == null || entry.VesselNumber == null || entry.Movement == null
                     || (entry.FinishedAt.HasValue && (!entry.Complete || entry.FinishedAt < entry.Time))
                     || entry.Time.Year < 1753 || entry.Time.Year > 9998)
                     throw new InvalidDataException("기록 ID 또는 필드가 올바르지 않습니다.");
-                if (entry.Category == "Vessel" && (!entry.Complete || entry.Items.Count != 0
+                if (entry.Category == "Vessel" && (entry.Items.Count != 0
                     || (entry.Movement != "입항" && entry.Movement != "출항")
-                    || String.IsNullOrWhiteSpace(entry.VesselType) || String.IsNullOrWhiteSpace(entry.VesselName)))
-                    throw new InvalidDataException("선박의 선종, 선명/추적번호와 입출항을 확인하세요.");
+                    || String.IsNullOrWhiteSpace(entry.VesselType)
+                    || (entry.IndependentMovement && !entry.Complete)
+                    || (entry.Movement == "입항" && !entry.Complete)
+                    || (book.Version >= 3 && !entry.IndependentMovement && entry.Complete && !entry.FinishedAt.HasValue)))
+                    throw new InvalidDataException("선박의 선종, 입출항 상태와 입항 시각을 확인하세요.");
                 HashSet<string> kinds = new HashSet<string>();
                 foreach (Item item in entry.Items)
                     if (item == null || String.IsNullOrWhiteSpace(item.KindId)
@@ -203,16 +303,21 @@ namespace CoastNotebook
         public static void Save(string path, Book book)
         {
             Validate(book);
-            // Preserve the exact v1 original before the first format upgrade.
-            if (File.Exists(path) && Load(path).Version == 1)
-                File.Copy(path, path + ".v1-" + DateTime.Now.ToString("yyyyMMdd-HHmmss")
-                    + "-" + Guid.NewGuid().ToString("N") + ".bak", false);
+            // Preserve the exact older-format original before upgrading.
+            if (File.Exists(path))
+            {
+                Book original = Load(path);
+                if (original.Version < CurrentVersion)
+                    File.Copy(path, path + ".v" + original.Version + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss")
+                        + "-" + Guid.NewGuid().ToString("N") + ".bak", false);
+            }
             int previous = book.Version;
             try
             {
-                if (book.Version == 1)
+                if (book.Version < CurrentVersion)
                     foreach (Entry entry in book.Entries) Queue(book, entry.Time);
-                book.Version = 2;
+                book.Version = CurrentVersion;
+                Validate(book);
                 AtomicWrite(path, delegate(Stream stream) { WriteXml(stream, book); });
             }
             catch { book.Version = previous; throw; }
@@ -252,7 +357,7 @@ namespace CoastNotebook
                 if (entry.Complete ? !done : !active) continue;
                 string text = entry.Title + " " + entry.Note + " " + entry.Describe()
                     + " " + entry.Camera + " " + entry.Section + " " + entry.Azimuth + " " + entry.Elevation
-                    + " " + entry.StateText() + " " + entry.CategoryText();
+                    + " " + entry.StateText() + " " + entry.CategoryText() + " " + entry.VesselNumber;
                 if (text.IndexOf(search ?? "", StringComparison.OrdinalIgnoreCase) < 0) continue;
                 result.Add(entry);
             }
@@ -292,6 +397,14 @@ namespace CoastNotebook
             string folder = Path.Combine(book.Settings.CsvFolder, day.ToString("yyyy"), Day(day));
             Directory.CreateDirectory(folder);
             string path = Path.Combine(folder, "Records.csv");
+            ExportEntries(book, SelectEntries(book, day, day, true, true, ""), path);
+            return path;
+        }
+
+        public static void ExportEntries(Book book, IList<Entry> entries, string path)
+        {
+            if (!String.Equals(Path.GetExtension(path), ".csv", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("출력 파일의 확장자는 .csv여야 합니다.");
             // IDs identify columns even after a type is renamed or removed.
             SortedDictionary<string, string> kinds = new SortedDictionary<string, string>();
             foreach (Kind kind in book.Settings.Kinds) kinds[kind.Id] = kind.Name;
@@ -318,7 +431,7 @@ namespace CoastNotebook
             List<string> header = new List<string>(new string[] {
                 "ID", "일시", "제목 / 장소", "상태", "내역", "비고", "사진수",
                 "구간", "카메라", "방위각(0~6400)", "고각(-180~180)",
-                "기록구분", "선종", "선명/추적번호", "입출항", "철수/완료일시" });
+                "기록구분", "선종", "선명", "등록구분(입출항)", "철수/입항/완료일시", "식별번호", "기존독립기록" });
             foreach (KeyValuePair<string, string> kind in kinds)
             {
                 header.Add(kind.Value + " [" + kind.Key + "] 합계");
@@ -329,9 +442,8 @@ namespace CoastNotebook
             }
             StringBuilder text = new StringBuilder();
             CsvLine(text, header);
-            foreach (Entry entry in book.Entries)
+            foreach (Entry entry in entries)
             {
-                if (entry.Time.Date != day.Date) continue;
                 List<string> row = new List<string>(new string[] {
                     entry.Id, entry.Time.ToString("yyyy-MM-dd HH:mm"), entry.Title,
                     entry.StateText(), entry.Describe(), entry.Note,
@@ -339,7 +451,8 @@ namespace CoastNotebook
                     entry.Azimuth.HasValue ? entry.Azimuth.Value.ToString(CultureInfo.InvariantCulture) : "",
                     entry.Elevation.HasValue ? entry.Elevation.Value.ToString(CultureInfo.InvariantCulture) : "",
                     entry.CategoryText(), entry.VesselType, entry.VesselName, entry.Movement,
-                    entry.FinishedAt.HasValue ? entry.FinishedAt.Value.ToString("yyyy-MM-dd HH:mm") : "" });
+                    entry.FinishedAt.HasValue ? entry.FinishedAt.Value.ToString("yyyy-MM-dd HH:mm") : "", entry.VesselNumber,
+                    entry.IndependentMovement ? "예" : "" });
                 foreach (string kind in kinds.Keys)
                 {
                     int count = 0;
@@ -364,7 +477,6 @@ namespace CoastNotebook
                 stream.Write(bom, 0, bom.Length);
                 stream.Write(bytes, 0, bytes.Length);
             });
-            return path;
         }
 
         public static string SafeName(string value)

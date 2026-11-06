@@ -4,6 +4,7 @@ using System.Text;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Windows.Forms;
+using System.Xml.Serialization;
 using CoastNotebook;
 
 class Regression
@@ -52,6 +53,7 @@ class Regression
         {
             CoreTests(args[0]);
             DomainTests();
+            MockDomainTests();
             if (args.Length > 1 && args[1] == "--ui") UiTests();
             Console.WriteLine("TOTAL PASSED: " + passed); return 0;
         }
@@ -66,7 +68,7 @@ class Regression
         Check(!old.Entries[0].Azimuth.HasValue && !old.Entries[0].Elevation.HasValue
             && old.Entries[0].Camera == "", "legacy unknown fields remain empty");
         Data.Save(path, old);
-        Check(Data.Load(path).Version == 2 && Data.Load(path).Entries[0].Id == "11111111111111111111111111111111",
+        Check(Data.Load(path).Version == Data.CurrentVersion && Data.Load(path).Entries[0].Id == "11111111111111111111111111111111",
             "upgrade roundtrip keeps ID and records");
         string[] backups = Directory.GetFiles(root, "Records.xml.v1-*.bak");
         Check(backups.Length == 1 && Convert.ToBase64String(File.ReadAllBytes(backups[0]))
@@ -135,40 +137,73 @@ class Regression
         Reject(delegate { Data.ExportDay(b, active.Time); }, "CSV folder error reported");
         Check(Data.Load(path).PendingDays.Count == 2, "CSV failure retains saved source and pending dates");
     }
+    static List<Entry> GridEntries(MainForm form, bool vessel)
+    {
+        List<Entry> result = new List<Entry>();
+        foreach (DataGridViewRow row in Field<DataGridView>(form, vessel ? "boatGrid" : "peopleGrid").Rows)
+            if (row.Tag is Entry) result.Add((Entry)row.Tag);
+        return result;
+    }
+    static Book Current(MainForm form) { return Field<Book>(form, "book"); }
+    static void Select(MainForm form, string id)
+    { form.GetType().GetField("selected", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(form, id); }
+    static Button FindButton(Control parent, string text)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            Button button = child as Button; if (button != null && button.Text == text) return button;
+            Button nested = FindButton(child, text); if (nested != null) return nested;
+        }
+        return null;
+    }
+    static void GridAction(MainForm form, bool vessel, string id)
+    {
+        DataGridView grid = Field<DataGridView>(form, vessel ? "boatGrid" : "peopleGrid");
+        foreach (DataGridViewRow row in grid.Rows)
+        {
+            Entry entry = row.Tag as Entry; if (entry == null || entry.Id != id) continue;
+            typeof(DataGridView).GetMethod("OnCellClick", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(grid, new object[] { new DataGridViewCellEventArgs(grid.Columns["action"].Index, row.Index) });
+            return;
+        }
+        throw new Exception("Expected action row missing");
+    }
     static void UiTests()
     {
-        Application.EnableVisualStyles();
-        string folder = Path.Combine(root, "UI"); Directory.CreateDirectory(folder);
+        Application.EnableVisualStyles(); string folder = Path.Combine(root, "UI"); Directory.CreateDirectory(folder);
         Book b = MakeBook(); b.Entries.Add(Make(DateTime.Now.AddMinutes(-2), false));
-        b.Settings.Kinds.Add(new Kind { Id = "group", Name = "채집/해루질", Unit = "명" });
+        b.Settings.Cameras = "카메라 A|암석지대,북방파제\n카메라 B|해변";
+        b.Settings.Harbors = "북항\n남항"; b.Settings.Kinds.Add(new Kind { Id = "group", Name = "채집/해루질", Unit = "명" });
         b.Entries.Add(Make(DateTime.Today.AddDays(-1), false));
-        Data.Save(Path.Combine(folder, "Records.xml"), b);
+        string path = Path.Combine(folder, "Records.xml"); Data.Save(path, b);
         using (MainForm form = new MainForm(folder))
         {
             form.Show(); Application.DoEvents();
-            Check(Field<Button>(form, "saveButton").Text == "등록", "new entry uses register button");
-            Check(Field<ListView>(form, "records").Items.Count == 1, "main view is today only");
-            Call(form, "LoadEntry", b.Entries[0]);
-            Check(Field<Button>(form, "saveButton").Text == "저장", "selected record uses save button");
-            Field<ListBox>(form, "cart").Items.Clear();
-            Check(Data.Load(Path.Combine(folder, "Records.xml")).Entries[0].Items.Count == 1,
-                "editor cart does not mutate saved record");
-            Call(form, "ResetEditor");
-            Field<ComboBox>(form, "title").Text = "사동해변";
-            Field<ComboBox>(form, "camera").Text = "사동해강안";
+            Check(form.Width == 570 && Field<Button>(form, "saveButton").Text == "식별", "mock width and identify button");
+            Check(GridEntries(form, false).Count == 1 && GridEntries(form, true).Count == 0, "separate target and vessel lists, today only");
+            Field<ComboBox>(form, "camera").SelectedItem = "카메라 B";
+            Check(Field<ComboBox>(form, "title").Items.Contains("해변") && !Field<ComboBox>(form, "title").Items.Contains("암석지대"), "camera-specific landmark selection");
+            Field<ComboBox>(form, "camera").SelectedItem = "카메라 A";
+            Field<ComboBox>(form, "title").SelectedIndex = 0;
             Field<DateTimePicker>(form, "date").Value = DateTime.Now.AddMinutes(-1);
-            Field<CheckBox>(form, "hasAzimuth").Checked = true;
-            Field<NumericUpDown>(form, "azimuth").Value = 3426;
-            Field<CheckBox>(form, "hasElevation").Checked = true;
-            Field<NumericUpDown>(form, "elevation").Value = -121;
-            Call(form, "AddItem", null, EventArgs.Empty); Call(form, "SaveEntry", null, EventArgs.Empty);
-            Book saved = Data.Load(Path.Combine(folder, "Records.xml"));
-            Check(saved.Entries.Count == 3 && saved.Entries[2].Azimuth == 3426
-                && saved.Entries[2].Elevation == -121 && saved.Entries[2].Section == "4구간", "UI register persists camera/angles/section");
-            Field<ComboBox>(form, "title").Text = "수정한 장소";
-            Call(form, "SaveEntry", null, EventArgs.Empty);
-            saved = Data.Load(Path.Combine(folder, "Records.xml"));
-            Check(saved.Entries.Count == 3 && saved.Entries[2].Title == "수정한 장소", "UI save updates without duplicate");
+            Field<TextBox>(form, "azimuth").Text = "3426"; Field<TextBox>(form, "elevation").Text = "-121";
+            // No cart click is required: identify uses the current item directly.
+            Field<Button>(form, "saveButton").PerformClick();
+            Check(Current(form).Entries.Count == 3 && Current(form).Entries[2].Title == ""
+                && Current(form).Entries[2].Azimuth == 3426 && Current(form).Entries[2].Elevation == -121,
+                "one-click identify supports omitted landmark and optional P/T");
+            string id = Current(form).Entries[2].Id;
+            Check(Field<Button>(form, "saveButton").Text == "식별" && Field<List<Item>>(form, "cartItems").Count == 0,
+                "successful identify returns to fresh input");
+            FindButton(form, "함께 추가").PerformClick();
+            Check(Field<List<Item>>(form, "cartItems").Count == 1, "add-together button creates a chip");
+            ((Button)Field<FlowLayoutPanel>(form, "cart").Controls[0]).PerformClick();
+            Check(Field<List<Item>>(form, "cartItems").Count == 0, "chip click removes only that item");
+            FindButton(form, "＋ 비고").PerformClick();
+            Check(Field<TextBox>(form, "note").Visible, "notes expand on click");
+            FindButton(form, "＋ 비고").PerformClick();
+            Call(form, "LoadEntry", Current(form).Entries[2]);
+            Check(Field<Button>(form, "saveButton").Text == "저장", "selected target switches to save");
             Field<ComboBox>(form, "kind").SelectedIndex = 1;
             Field<ComboBox>(form, "subkind").SelectedItem = "채집";
             Field<NumericUpDown>(form, "quantity").Value = 2; Call(form, "AddItem", null, EventArgs.Empty);
@@ -176,40 +211,122 @@ class Regression
             Field<NumericUpDown>(form, "quantity").Value = 3; Call(form, "AddItem", null, EventArgs.Empty);
             Field<ComboBox>(form, "subkind").SelectedItem = "채집";
             Field<NumericUpDown>(form, "quantity").Value = 4; Call(form, "AddItem", null, EventArgs.Empty);
+            Check(Data.Load(path).Entries[2].Items.Count == 1, "cart editing does not mutate saved source");
             Call(form, "SaveEntry", null, EventArgs.Empty);
-            saved = Data.Load(Path.Combine(folder, "Records.xml"));
-            Check(saved.Entries[2].Items.Count == 3 && saved.Entries[2].Items[1].Count == 6
-                && saved.Entries[2].Items[2].Count == 3, "UI combines same child but keeps different children");
-            Check(Field<Label>(form, "totals").Text.Contains("채집/해루질 9명"), "UI shows parent total");
-            Field<CheckBox>(form, "complete").Checked = true; Call(form, "SaveEntry", null, EventArgs.Empty);
-            saved = Data.Load(Path.Combine(folder, "Records.xml"));
-            Check(saved.Entries[2].Category == "Target" && saved.Entries[2].Complete
-                && saved.Entries[2].FinishedAt.HasValue && saved.Entries[2].StateText() == "철수", "UI target withdrawal time persisted");
-            for (int i = 0; i < 2; i++)
+            Entry edited = Current(form).Entries.Find(delegate(Entry e) { return e.Id == id; });
+            Check(Current(form).Entries.Count == 3 && edited.Items.Count == 3 && edited.Items[1].Count == 6
+                && edited.Items[2].Count == 3, "save keeps ID and combines each child separately");
+            Select(form, id); GridAction(form, false, id);
+            Check(Current(form).Entries[2].Complete && Current(form).Entries[2].FinishedAt.HasValue
+                && GridEntries(form, false).Count == 1, "row withdrawal updates time and active filter");
+            Field<CheckBox>(form, "peopleDone").Checked = true;
+            Check(Field<CheckBox>(form, "peopleAll").Checked && !Field<CheckBox>(form, "peopleActive").Checked,
+                "both status choices normalize to all");
+            Field<CheckBox>(form, "peopleAll").Checked = false;
+            Check(Field<CheckBox>(form, "peopleAll").Checked && GridEntries(form, false).Count == 2,
+                "last unchecked status falls back to all");
+            // Undo withdrawal preserves changes to unrelated book metadata made afterward.
+            Current(form).Help = "new help";
+            Field<Button>(form, "undoButton").PerformClick();
+            Check(!Current(form).Entries.Find(delegate(Entry e) { return e.Id == id; }).Complete
+                && Current(form).Help == "new help", "undo restores records and preserves latest metadata");
+            Field<ComboBox>(form, "harbor").SelectedItem = "북항";
+            Field<ComboBox>(form, "harbor").Text = "북항";
+            Field<ComboBox>(form, "vesselType").Text = "어선";
+            Field<DateTimePicker>(form, "boatTime").Value = DateTime.Now.AddMinutes(-1);
+            FindButton(form, "출항").PerformClick();
+            Entry departure = Current(form).Entries[3]; string departureId = departure.Id;
+            Check(departure.VesselName == "" && departure.VesselNumber == "" && !departure.Complete
+                && GridEntries(form, true).Count == 1, "unnamed departure is accepted and shown as outbound");
+            Select(form, departureId); GridAction(form, true, departureId);
+            Entry arrived = Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; });
+            Check(Current(form).Entries.Count == 4 && arrived.Complete && arrived.FinishedAt.HasValue
+                && GridEntries(form, true).Count == 0 && arrived.Movement == "출항", "arrival links to original departure without new row");
+            Field<CheckBox>(form, "boatDone").Checked = true;
+            Check(GridEntries(form, true).Count == 1 && GridEntries(form, false).Count == 2, "vessel and target filters are independent");
+            Call(form, "UndoLast", null, EventArgs.Empty);
+            Check(!Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; }).Complete,
+                "undo linked arrival restores outbound state");
+            Field<DateTimePicker>(form, "boatTime").Value = DateTime.Now.AddMinutes(-1);
+            FindButton(form, "입항").PerformClick();
+            Check(Current(form).Entries.Count == 5 && Current(form).Entries[4].Movement == "입항"
+                && Current(form).Entries[4].FinishedAt.HasValue, "standalone arrival remains available");
+            Entry standalone = Current(form).Entries[4];
+            using (RecordEditDialog edit = new RecordEditDialog(FindCopy(Current(form), standalone.Id), Current(form).Settings))
             {
-                Call(form, "ResetEditor"); Field<ComboBox>(form, "category").SelectedIndex = 1;
-                Field<ComboBox>(form, "title").Text = "테스트항";
-                Field<DateTimePicker>(form, "date").Value = DateTime.Now.AddMinutes(-1);
-                Field<ComboBox>(form, "vesselType").Text = "어선";
-                Field<TextBox>(form, "vesselName").Text = "테스트선박";
-                Field<ComboBox>(form, "movement").SelectedIndex = i;
-                Call(form, "SaveEntry", null, EventArgs.Empty);
+                Field<TextBox>(edit, "name").Text = "수정 선박"; Field<TextBox>(edit, "number").Text = "ID-12";
+                Call(edit, "Save", null, EventArgs.Empty);
+                Check(edit.DialogResult == DialogResult.OK && edit.Value.VesselNumber == "ID-12",
+                    "vessel details dialog supports separate name and number");
             }
-            saved = Data.Load(Path.Combine(folder, "Records.xml"));
-            Check(saved.Entries.Count == 5 && saved.Entries[3].Movement == "출항" && saved.Entries[4].Movement == "입항"
-                && saved.Entries[3].Id != saved.Entries[4].Id && saved.Entries[4].Items.Count == 0,
-                "UI departure and arrival are independent vessel events");
-            Field<CheckBox>(form, "showActive").Checked = false;
-            Field<CheckBox>(form, "showDone").Checked = false;
-            Check(Field<ListView>(form, "records").Items.Count == 4, "UI cleared filters do not blank list");
-            using (HistoryDialog history = new HistoryDialog(saved))
+            Field<Button>(form, "peopleHeader").PerformClick(); Field<Button>(form, "boatHeader").PerformClick();
+            Check(!Field<Panel>(form, "peoplePanel").Controls["body"].Visible && !Field<Panel>(form, "boatPanel").Controls["body"].Visible,
+                "both lists can collapse");
+            Field<Button>(form, "peopleHeader").PerformClick(); Field<Button>(form, "boatHeader").PerformClick();
+            Check(Field<Panel>(form, "peoplePanel").Controls["body"].Visible && Field<Panel>(form, "boatPanel").Controls["body"].Visible,
+                "collapsed lists reopen");
+            using (ConfigDialog config = new ConfigDialog(Current(form).Settings))
+            {
+                config.Show(form); Application.DoEvents();
+                Call(config, "Save", null, EventArgs.Empty);
+                Check(config.Value.Cameras == Current(form).Settings.Cameras && config.Value.Harbors == "북항\n남항"
+                    && config.Value.Kinds[0].Id == "kind", "settings preserve camera associations, harbor order and kind IDs");
+                config.Close();
+            }
+            using (HistoryDialog history = new HistoryDialog(Current(form)))
             {
                 history.Show(form); Application.DoEvents();
-                Check(Field<ListView>(history, "records").Items.Count == 5, "period popup includes prior day");
+                Field<DateTimePicker>(history, "from").Value = DateTime.Today.AddDays(-6);
+                Check(Field<ListView>(history, "records").Items.Count == 5, "history includes prior day and both domains");
                 history.Close();
             }
             form.Close();
         }
+    }
+    static Entry FindCopy(Book b, string id) { return Data.Clone(b).Entries.Find(delegate(Entry e) { return e.Id == id; }); }
+
+    static void MockDomainTests()
+    {
+        Check(Data.OptionalAngle("", 0, 6400) == null && Data.OptionalAngle("0", 0, 6400) == 0,
+            "empty angle and measured zero remain distinct");
+        Reject(delegate { Data.OptionalAngle("1.5", 0, 6400); }, "fractional angle rejected");
+        Reject(delegate { Data.OptionalAngle("6401", 0, 6400); }, "text angle range checked");
+        Settings settings = MakeBook().Settings; settings.Cameras = "A|one,two\nB|three";
+        List<CameraSpec> cameras = Data.Cameras(settings);
+        Check(cameras[0].Name == "A" && cameras[0].Places[1] == "two" && cameras[1].Places[0] == "three", "camera map order and associations");
+        settings.Cameras = "A"; settings.Places = "shared";
+        Check(Data.Cameras(settings)[0].Places[0] == "shared", "old camera format uses common places");
+        settings.Cameras = "A|one\nA|two";
+        Reject(delegate { Data.Cameras(settings); }, "duplicate camera names rejected");
+        Book b = MakeBook(); Entry vessel = new Entry { Id = Guid.NewGuid().ToString("N"), Category = "Vessel", Time = DateTime.Now.AddHours(-1),
+            Title = "북항", Movement = "출항", VesselType = "어선", VesselNumber = "BOAT-12" };
+        b.Entries.Add(vessel); Data.Validate(b); Data.Finish(vessel, DateTime.Now);
+        Check(vessel.Complete && vessel.FinishedAt.HasValue && vessel.StateText() == "입항" && vessel.Movement == "출항", "departure retains original event and links arrival timestamp");
+        Data.Reopen(vessel); Check(!vessel.Complete && !vessel.FinishedAt.HasValue && vessel.StateText() == "출항중", "arrival state can be reopened");
+        Reject(delegate { Data.Finish(vessel, vessel.Time.AddMinutes(-1)); }, "arrival before departure rejected");
+        Reject(delegate { Data.Finish(vessel, DateTime.Now.AddMinutes(5)); }, "future arrival rejected");
+        Entry alone = new Entry { Id = Guid.NewGuid().ToString("N"), Category = "Vessel", Time = DateTime.Today, FinishedAt = DateTime.Today,
+            Complete = true, Title = "남항", Movement = "입항", VesselType = "레저보트" };
+        b.Entries.Add(alone); Data.Validate(b);
+        Reject(delegate { Data.Reopen(alone); }, "standalone arrival cannot invent departure");
+        string path = Path.Combine(root, "query.csv"); Data.ExportEntries(b, new List<Entry> { vessel }, path);
+        Check(ReadCsv(File.ReadAllText(path)).Count == 2 && File.ReadAllText(path).Contains("BOAT-12") && !File.ReadAllText(path).Contains(alone.Id),
+            "query CSV contains only selected entries and vessel number");
+        Reject(delegate { Data.ExportEntries(b, b.Entries, Path.Combine(root, "Records.xml")); }, "CSV export cannot overwrite an XML source");
+        // Simulate the exact old v2 semantics: Complete meant an independent event had been recorded.
+        Book old = MakeBook(); old.Version = 2; Entry oldVessel = new Entry { Id = Guid.NewGuid().ToString("N"), Category = "Vessel", Time = DateTime.Today,
+            Title = "기존항", Movement = "출항", VesselType = "어선", VesselName = "기존선박", Complete = true };
+        old.Entries.Add(oldVessel); string xml = Path.Combine(root, "v2.xml");
+        using (FileStream stream = File.Create(xml)) new XmlSerializer(typeof(Book)).Serialize(stream, old);
+        Book imported = Data.Load(xml);
+        Check(imported.Entries[0].IndependentMovement && imported.Entries[0].StateText() == "출항(기존)" && imported.Entries[0].Complete,
+            "legacy independent departure does not fabricate current outbound status");
+        Data.Reopen(imported.Entries[0]); Data.Save(xml, imported);
+        Check(Data.Load(xml).Version == 3 && !Data.Load(xml).Entries[0].IndependentMovement
+            && Directory.GetFiles(root, "v2.xml.v2-*.bak").Length == 1, "explicit legacy reopen survives v2 upgrade and backup");
+        Check(PhotoAssignDialog.Preview(vessel, new string[] { "a.jpg", "b.png" }).Contains(" (2).png")
+            && PhotoAssignDialog.Preview(vessel, new string[] { "a.jpg" }).Contains(Data.PhotoFileName(vessel, 1, 1, ".jpg")),
+            "photo preview follows actual one/multiple-file naming");
     }
 
     static List<string[]> ReadCsv(string text)
@@ -247,7 +364,9 @@ class Regression
         List<string[]> rows = ReadCsv(File.ReadAllText(Data.ExportDay(b, DateTime.Today)));
         string[] expected = { "9", "4", "2", "3" };
         bool correct = rows.Count == 2 && rows[0].Length == rows[1].Length;
-        for (int i = 0; i < expected.Length; i++) correct &= rows[1][16 + i] == expected[i];
+        string[] columns = { "채집/해루질 [group] 합계", "채집/해루질 > 미분류(기존 기록) [group] 수량",
+            "채집/해루질 > 채집 [group] 수량", "채집/해루질 > 해루질 [group] 수량" };
+        for (int i = 0; i < expected.Length; i++) { int column = Array.IndexOf(rows[0], columns[i]); correct &= column >= 0 && rows[1][column] == expected[i]; }
         Check(correct, "CSV parent sum and classified/unclassified child columns agree");
         b.Settings.Kinds.Clear(); b.Settings.Kinds.Add(new Kind { Id = "new", Name = "차량", Unit = "대" });
         string csv = File.ReadAllText(Data.ExportDay(b, DateTime.Today));
@@ -259,7 +378,7 @@ class Regression
         e.Complete = true; e.FinishedAt = e.Time.AddHours(1); Data.Save(xml, b);
         Check(Data.Load(xml).Entries[0].FinishedAt == e.Time.AddHours(1) && e.StateText() == "철수", "target completion timestamp roundtrip");
         Entry vessel = new Entry { Id = Guid.NewGuid().ToString("N"), Time = DateTime.Today,
-            Title = "테스트항", Category = "Vessel", Complete = true, VesselType = "어선", VesselName = "테스트선박", Movement = "입항" };
+            Title = "테스트항", Category = "Vessel", Complete = true, VesselType = "어선", VesselName = "테스트선박", Movement = "입항", FinishedAt = DateTime.Today };
         b.Entries.Add(vessel); Data.Save(xml, b);
         Check(Data.Load(xml).Entries[1].StateText() == "입항" && vessel.Describe().Contains("테스트선박"), "vessel event roundtrip");
         Check(Data.SelectEntries(b, DateTime.Today, DateTime.Today, true, true, "선박").Count == 1,
