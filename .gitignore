@@ -1,0 +1,6 @@
+_build/
+Data/
+Build.log
+CoastNotebook.exe
+*.zip
+!COAST-source.zip
