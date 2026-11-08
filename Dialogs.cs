@@ -133,11 +133,40 @@ namespace CoastNotebook
         {
             return list.SelectedItems.Count == 0 ? null : list.SelectedItems[0].Tag as Entry;
         }
+        public static ListView CreateDomain(bool vessel)
+        {
+            ListView list = Create(); list.Columns.Clear();
+            string[] titles = vessel ? new string[] { "출항/등록일시", "출항/등록항", "입항일시", "입항항", "선박유형", "선명", "식별번호", "상태", "비고", "사진", "구간" }
+                : new string[] { "식별일시", "카메라", "지형지물", "유형·수량", "상태", "철수일시", "P", "T", "비고", "사진", "구간" };
+            foreach (string title in titles) list.Columns.Add(title, title.Contains("일시") ? 125 : 100);
+            return list;
+        }
+        public static void FillDomain(ListView list, IList<Entry> entries, bool vessel)
+        {
+            list.BeginUpdate();
+            try
+            {
+                list.Items.Clear();
+                foreach (Entry entry in entries)
+                {
+                    if ((entry.Category == "Vessel") != vessel) throw new ArgumentException("조회 종류가 다른 기록입니다.");
+                    string finished = entry.FinishedAt.HasValue ? entry.FinishedAt.Value.ToString("yyyy-MM-dd HH:mm") : "";
+                    string[] fields = vessel ? new string[] { entry.Time.ToString("yyyy-MM-dd HH:mm"), entry.Title, finished, entry.ArrivalPlace(),
+                        entry.VesselType, entry.VesselName, entry.VesselNumber, entry.StateText(), entry.Note, entry.Photos.Count.ToString(), entry.Section }
+                        : new string[] { entry.Time.ToString("yyyy-MM-dd HH:mm"), entry.Camera, entry.Title, entry.Describe(), entry.StateText(), finished,
+                        entry.Azimuth.HasValue ? entry.Azimuth.Value.ToString() : "", entry.Elevation.HasValue ? entry.Elevation.Value.ToString() : "", entry.Note,
+                        entry.Photos.Count.ToString(), entry.Section };
+                    ListViewItem row = new ListViewItem(fields); row.Tag = entry; list.Items.Add(row);
+                }
+            }
+            finally { list.EndUpdate(); }
+        }
     }
 
     public class HistoryDialog : Form
     {
         readonly Book book;
+        readonly bool vessel;
         DateTimePicker from, through;
         CheckBox active, done;
         TextBox search;
@@ -146,9 +175,9 @@ namespace CoastNotebook
         List<Entry> current = new List<Entry>();
         public string SelectedId = "";
 
-        public HistoryDialog(Book source)
+        public HistoryDialog(Book source, bool vessels)
         {
-            book = source; Text = "COAST · 기록 조회"; Size = new Size(950, 560);
+            book = source; vessel = vessels; Text = vessel ? "COAST · 선박 조회" : "COAST · 식별표적 조회"; Size = new Size(950, 560);
             MinimumSize = new Size(680, 380); StartPosition = FormStartPosition.CenterParent;
             CoastStyle.Form(this);
             TableLayoutPanel filters = CoastStyle.Card();
@@ -167,11 +196,11 @@ namespace CoastNotebook
             }));
             buttons.Controls.Add(CoastStyle.Button("CSV 내보내기", Export));
             buttons.Controls.Add(CoastStyle.Button("유형별 집계", ShowStats));
-            active = new CheckBox(); active.Text = "관리중/출항중"; active.Checked = true; active.Width = 125;
-            done = new CheckBox(); done.Text = "철수/입항/기존"; done.Checked = true; done.Width = 130;
+            active = new CheckBox(); active.Text = vessel ? "출항중" : "관리중"; active.Checked = true; active.Width = 90;
+            done = new CheckBox(); done.Text = vessel ? "입항/기존" : "철수"; done.Checked = true; done.Width = 100;
             buttons.Controls.Add(active); buttons.Controls.Add(done); CoastStyle.Add(filters, buttons, 65);
             count = new Label(); count.ForeColor = CoastStyle.Muted; CoastStyle.Add(filters, count, 23);
-            records = RecordTable.Create(); records.Dock = DockStyle.Fill;
+            records = RecordTable.CreateDomain(vessel); records.Dock = DockStyle.Fill;
             Button open = CoastStyle.Button("선택 기록 열기 (또는 두 번 클릭)", OpenSelected); open.Dock = DockStyle.Bottom;
             records.DoubleClick += OpenSelected;
             Controls.Add(records); Controls.Add(open); Controls.Add(filters);
@@ -183,9 +212,9 @@ namespace CoastNotebook
         {
             if (from.Value.Date > through.Value.Date)
             { current.Clear(); records.Items.Clear(); count.Text = "시작일이 종료일보다 늦습니다."; return; }
-            current = Data.SelectEntries(book, from.Value, through.Value, active.Checked, done.Checked, search.Text);
-            RecordTable.Fill(records, current, "");
-            count.Text = current.Count + "건 · 상태 모두 해제 시 전체 · 출항/식별 날짜 기준";
+            current = Data.Domain(Data.SelectEntries(book, from.Value, through.Value, active.Checked, done.Checked, search.Text), vessel);
+            RecordTable.FillDomain(records, current, vessel);
+            count.Text = current.Count + "건 · 상태 모두 해제 시 전체 · " + (vessel ? "출항/등록" : "식별") + " 날짜 기준";
         }
         void Export(object sender, EventArgs e)
         {
@@ -193,16 +222,16 @@ namespace CoastNotebook
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
                 dialog.Filter = "CSV 파일|*.csv"; dialog.DefaultExt = "csv"; dialog.AddExtension = true;
-                dialog.FileName = "COAST_" + DateTime.Today.ToString("yyyyMMdd") + "_조회.csv";
+                dialog.FileName = "COAST_" + (vessel ? "선박_" : "식별표적_") + DateTime.Today.ToString("yyyyMMdd") + "_조회.csv";
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                try { Data.ExportEntries(book, current, dialog.FileName); count.Text = "조회 결과 CSV 저장 완료: " + dialog.FileName; }
+                try { Data.ExportEntries(book, current, dialog.FileName, vessel); count.Text = "조회 결과 CSV 저장 완료: " + dialog.FileName; }
                 catch (Exception ex) { MessageBox.Show(this, ex.Message, "CSV 저장 확인"); }
             }
         }
         void ShowStats(object sender, EventArgs e)
         {
             if (from.Value.Date > through.Value.Date) { count.Text = "조회 기간을 확인하세요."; return; }
-            using (TextDialog dialog = new TextDialog("유형별 집계", Data.Statistics(current), true)) dialog.ShowDialog(this);
+            using (TextDialog dialog = new TextDialog("유형별 집계", Data.Statistics(current, vessel), true)) dialog.ShowDialog(this);
         }
         void OpenSelected(object sender, EventArgs e)
         {
@@ -257,7 +286,7 @@ namespace CoastNotebook
         public Entry Value;
         readonly Entry entry;
         DateTimePicker time, finished;
-        ComboBox place, camera, vesselType;
+        ComboBox place, camera, vesselType, arrivalPort;
         TextBox name, number, note;
         CheckBox complete, hasFinished;
         public RecordEditDialog(Entry value, Settings settings)
@@ -270,11 +299,13 @@ namespace CoastNotebook
             CoastStyle.Add(card, CoastStyle.Field("기록 일시", time), 49);
             place = new ComboBox(); place.Text = entry.Title;
             foreach (string harbor in Data.Lines(settings.Harbors)) place.Items.Add(harbor);
-            CoastStyle.Add(card, CoastStyle.Field(entry.Category == "Vessel" ? "항구" : "지형지물 · 생략 가능", place), 49);
+            CoastStyle.Add(card, CoastStyle.Field(entry.Category == "Vessel" ? "출항/등록항" : "지형지물 · 생략 가능", place), 49);
             if (entry.Category == "Vessel")
             {
                 vesselType = new ComboBox(); foreach (string type in Data.Lines(settings.VesselTypes)) vesselType.Items.Add(type); vesselType.Text = entry.VesselType;
                 name = new TextBox(); name.Text = entry.VesselName; number = new TextBox(); number.Text = entry.VesselNumber;
+                arrivalPort = new ComboBox(); foreach (string port in Data.Lines(settings.Harbors)) arrivalPort.Items.Add(port);
+                arrivalPort.Text = entry.ArrivalPlace(); CoastStyle.Add(card, CoastStyle.Field("입항항 (직접 입력 가능)", arrivalPort), 49);
                 CoastStyle.Add(card, CoastStyle.Field("선박유형", vesselType), 49);
                 CoastStyle.Add(card, CoastStyle.Row(new Control[] { CoastStyle.Field("선명 · 선택", name), CoastStyle.Field("식별번호 · 선택", number) }, 50, 50), 49);
             }
@@ -309,6 +340,8 @@ namespace CoastNotebook
                 {
                     if (String.IsNullOrWhiteSpace(entry.Title)) throw new FormatException("항구를 입력하세요.");
                     entry.VesselType = vesselType.Text.Trim(); entry.VesselName = name.Text.Trim(); entry.VesselNumber = number.Text.Trim();
+                    entry.ArrivalHarbor = complete.Checked ? arrivalPort.Text.Trim() : "";
+                    if (entry.Complete && !entry.IndependentMovement && entry.ArrivalHarbor.Length == 0) throw new FormatException("입항항을 입력하세요.");
                     if (entry.Movement == "출항" && (!entry.Complete || entry.FinishedAt.HasValue)) entry.IndependentMovement = false;
                     if (!entry.IndependentMovement && entry.Movement == "입항") entry.FinishedAt = entry.Time;
                 }

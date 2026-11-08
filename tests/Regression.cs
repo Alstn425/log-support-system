@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Windows.Forms;
 using System.Xml.Serialization;
+using System.Drawing;
 using CoastNotebook;
 
 class Regression
@@ -54,6 +55,7 @@ class Regression
             CoreTests(args[0]);
             DomainTests();
             MockDomainTests();
+            ReviewDomainTests();
             if (args.Length > 1 && args[1] == "--ui") UiTests();
             Console.WriteLine("TOTAL PASSED: " + passed); return 0;
         }
@@ -159,6 +161,11 @@ class Regression
     static void GridAction(MainForm form, bool vessel, string id)
     {
         DataGridView grid = Field<DataGridView>(form, vessel ? "boatGrid" : "peopleGrid");
+        if (vessel)
+        {
+            Entry entry = Current(form).Entries.Find(delegate(Entry value) { return value.Id == id; });
+            MenuAction(form, entry, "빠른 입항"); return;
+        }
         foreach (DataGridViewRow row in grid.Rows)
         {
             Entry entry = row.Tag as Entry; if (entry == null || entry.Id != id) continue;
@@ -204,12 +211,11 @@ class Regression
             FindButton(form, "＋ 비고").PerformClick();
             Call(form, "LoadEntry", Current(form).Entries[2]);
             Check(Field<Button>(form, "saveButton").Text == "저장", "selected target switches to save");
-            Field<ComboBox>(form, "kind").SelectedIndex = 1;
-            Field<ComboBox>(form, "subkind").SelectedItem = "채집";
+            SelectKind(form, "채집");
             Field<NumericUpDown>(form, "quantity").Value = 2; Call(form, "AddItem", null, EventArgs.Empty);
-            Field<ComboBox>(form, "subkind").SelectedItem = "해루질";
+            SelectKind(form, "해루질");
             Field<NumericUpDown>(form, "quantity").Value = 3; Call(form, "AddItem", null, EventArgs.Empty);
-            Field<ComboBox>(form, "subkind").SelectedItem = "채집";
+            SelectKind(form, "채집");
             Field<NumericUpDown>(form, "quantity").Value = 4; Call(form, "AddItem", null, EventArgs.Empty);
             Check(Data.Load(path).Entries[2].Items.Count == 1, "cart editing does not mutate saved source");
             Call(form, "SaveEntry", null, EventArgs.Empty);
@@ -273,16 +279,127 @@ class Regression
                     && config.Value.Kinds[0].Id == "kind", "settings preserve camera associations, harbor order and kind IDs");
                 config.Close();
             }
-            using (HistoryDialog history = new HistoryDialog(Current(form)))
+            ReviewUiTests(form, path, departureId);
+            using (HistoryDialog history = new HistoryDialog(Current(form), false))
             {
                 history.Show(form); Application.DoEvents();
                 Field<DateTimePicker>(history, "from").Value = DateTime.Today.AddDays(-6);
-                Check(Field<ListView>(history, "records").Items.Count == 5, "history includes prior day and both domains");
+                Check(Field<ListView>(history, "records").Items.Count == 3, "target history includes prior day and excludes vessels");
                 history.Close();
             }
+            using (HistoryDialog history = new HistoryDialog(Current(form), true))
+            {
+                history.Show(form); Application.DoEvents();
+                Field<DateTimePicker>(history, "from").Value = DateTime.Today.AddDays(-6);
+                Check(Field<ListView>(history, "records").Items.Count == 2
+                    && !history.Text.Contains("식별표적"), "vessel history excludes targets");
+                bool hasPort = false, hasCamera = false;
+                foreach (ColumnHeader column in Field<ListView>(history, "records").Columns)
+                { hasPort |= column.Text == "입항항"; hasCamera |= column.Text == "카메라"; }
+                Check(hasPort && !hasCamera, "vessel query uses vessel columns");
+                history.Close();
+            }
+            Call(form, "ResetEditor");
             form.Close();
         }
     }
+    static void SelectKind(MainForm form, string name)
+    {
+        ComboBox box = Field<ComboBox>(form, "kind");
+        for (int i = 0; i < box.Items.Count; i++) if (box.Items[i].ToString() == name) { box.SelectedIndex = i; return; }
+        throw new Exception("Kind not found: " + name);
+    }
+    static void MenuAction(MainForm form, Entry entry, string action)
+    {
+        Control owner = Field<DataGridView>(form, entry.Category == "Vessel" ? "boatGrid" : "peopleGrid");
+        Call(form, "ShowRecordMenu", owner, entry, new Point(5, 5));
+        ContextMenuStrip menu = Field<ContextMenuStrip>(form, "recordMenu"); menu.Close();
+        foreach (ToolStripItem item in menu.Items) if (item.Text == action) { item.PerformClick(); Application.DoEvents(); return; }
+        throw new Exception("Menu action missing: " + action);
+    }
+    static void ReviewUiTests(MainForm form, string path, string departureId)
+    {
+        FlowLayoutPanel page = Field<FlowLayoutPanel>(form, "page");
+        Check(page.Controls[0] == Field<TableLayoutPanel>(form, "targetCard")
+            && page.Controls[1] == Field<Panel>(form, "peoplePanel") && page.Controls[3] == Field<Panel>(form, "boatPanel"),
+            "page order is target input/list then vessel input/list");
+        Check(Field<DateTimePicker>(form, "date").CustomFormat == "HH:mm"
+            && Field<DateTimePicker>(form, "boatTime").CustomFormat == "HH:mm"
+            && Field<DateTimePicker>(form, "targetDay").Font.Size >= 12, "large separate dates and time-only inputs");
+        Check(form.GetType().GetField("subkind", BindingFlags.NonPublic | BindingFlags.Instance) == null,
+            "no separate subtype control");
+        SelectKind(form, "해루질"); Check(Field<ComboBox>(form, "kind").SelectedItem is KindChoice,
+            "slash children appear directly in the main type dropdown");
+        Call(form, "ResetEditor");
+        int height = Field<Panel>(form, "peoplePanel").Height;
+        Panel grip = (Panel)Field<Panel>(form, "peoplePanel").Controls["peopleResize"];
+        typeof(Control).GetMethod("OnMouseDown", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(grip,
+            new object[] { new MouseEventArgs(MouseButtons.Left, 1, 2, 2, 0) });
+        typeof(Control).GetMethod("OnMouseMove", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(grip,
+            new object[] { new MouseEventArgs(MouseButtons.Left, 0, 2, 32, 0) });
+        typeof(Control).GetMethod("OnMouseUp", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(grip,
+            new object[] { new MouseEventArgs(MouseButtons.Left, 1, 2, 32, 0) });
+        Check(Field<Panel>(form, "peoplePanel").Height == height + 30, "drag grip changes target list height");
+        Call(form, "ResizeList", false, 150); Call(form, "ResizeList", true, 340);
+        Check(Field<Panel>(form, "boatPanel").Height == 340 && Field<Panel>(form, "peoplePanel").Height == 150,
+            "list heights can be adjusted independently");
+        DataGridView grid = Field<DataGridView>(form, "boatGrid");
+        Check(!grid.Columns.Contains("action") && !grid.Columns.Contains("menu") && grid.Columns.Count == 6,
+            "vessel grid has no processing column");
+        Button settings = FindButton(form, "설정 ⋯");
+        for (int i = 0; i < 12; i++)
+        {
+            settings.PerformClick(); Application.DoEvents(); Field<ContextMenuStrip>(form, "toolsMenu").Close();
+        }
+        Check(!Field<ContextMenuStrip>(form, "toolsMenu").IsDisposed, "tools menu survives repeated open/close");
+        Entry departure = FindCopy(Current(form), departureId); departure.Time = DateTime.Now.AddHours(-1);
+        Check((bool)form.GetType().GetMethod("StoreEntry", BindingFlags.NonPublic | BindingFlags.Instance)
+            .Invoke(form, new object[] { departure, "test departure time" }), "prepare older departure");
+        for (int i = 0; i < 12; i++)
+        {
+            Call(form, "ShowRecordMenu", grid, departure, new Point(5, 5));
+            Field<ContextMenuStrip>(form, "recordMenu").Close(); Application.DoEvents();
+        }
+        Check(!Field<ContextMenuStrip>(form, "recordMenu").IsDisposed, "record context menu survives repeated close");
+        MenuAction(form, departure, "입항 처리");
+        Check(Field<string>(form, "arrivalId") == departureId, "context action expands arrival controls for selected vessel");
+        Field<DateTimePicker>(form, "arrivalDay").Value = departure.Time.Date;
+        Field<DateTimePicker>(form, "arrivalTime").Value = departure.Time.AddMinutes(-1);
+        Call(form, "CompleteArrival", "남항");
+        Check(!Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; }).Complete
+            && Field<string>(form, "arrivalId") == departureId, "invalid arrival time keeps draft and saved vessel unchanged");
+        Field<DateTimePicker>(form, "arrivalTime").Value = DateTime.Now.AddMinutes(-10);
+        FindButton(Field<FlowLayoutPanel>(form, "arrivalChoices"), "남항").PerformClick();
+        Entry arrived = Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; });
+        Check(arrived.Complete && arrived.Title == "북항" && arrived.ArrivalPlace() == "남항"
+            && arrived.FinishedAt.Value < DateTime.Now.AddMinutes(-5), "preset arrival stores another harbor and earlier time without changing departure");
+        Check(Data.Load(path).Entries.Find(delegate(Entry e) { return e.Id == departureId; }).ArrivalHarbor == "남항",
+            "arrival harbor is persisted");
+        Call(form, "UndoLast", null, EventArgs.Empty); departure = FindCopy(Current(form), departureId);
+        MenuAction(form, departure, "입항 처리");
+        FindButton(Field<FlowLayoutPanel>(form, "arrivalChoices"), "직접입력").PerformClick();
+        Field<TextBox>(form, "arrivalManual").Text = "외부 포구";
+        Field<DateTimePicker>(form, "arrivalTime").Value = DateTime.Now.AddMinutes(10);
+        Field<Button>(form, "arrivalConfirm").PerformClick();
+        Check(Field<TextBox>(form, "arrivalManual").Text == "외부 포구"
+            && !Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; }).Complete,
+            "future arrival rejected while manual port input is retained");
+        Field<DateTimePicker>(form, "arrivalTime").Value = DateTime.Now.AddMinutes(-12);
+        Field<Button>(form, "arrivalConfirm").PerformClick();
+        arrived = Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; });
+        Check(arrived.ArrivalPlace() == "외부 포구" && arrived.Title == "북항", "unconfigured port can be entered inline");
+        Select(form, departureId); Call(form, "RestoreSelected", null, EventArgs.Empty);
+        departure = FindCopy(Current(form), departureId); MenuAction(form, departure, "빠른 입항");
+        arrived = Current(form).Entries.Find(delegate(Entry e) { return e.Id == departureId; });
+        Check(arrived.ArrivalPlace() == "북항" && arrived.FinishedAt.Value > DateTime.Now.AddMinutes(-1),
+            "quick arrival uses current time and original departure harbor");
+        Call(form, "ResetEditor");
+        Field<DateTimePicker>(form, "targetDay").Value = DateTime.Today.AddDays(-3);
+        Field<DateTimePicker>(form, "date").Value = DateTime.Today.AddHours(10);
+        Check(Field<DateTimePicker>(form, "boatDay").Value.Date == DateTime.Today, "target date does not change vessel draft date");
+        Call(form, "ResetEditor");
+    }
+
     static Entry FindCopy(Book b, string id) { return Data.Clone(b).Entries.Find(delegate(Entry e) { return e.Id == id; }); }
 
     static void MockDomainTests()
@@ -322,11 +439,39 @@ class Regression
         Check(imported.Entries[0].IndependentMovement && imported.Entries[0].StateText() == "출항(기존)" && imported.Entries[0].Complete,
             "legacy independent departure does not fabricate current outbound status");
         Data.Reopen(imported.Entries[0]); Data.Save(xml, imported);
-        Check(Data.Load(xml).Version == 3 && !Data.Load(xml).Entries[0].IndependentMovement
+        Check(Data.Load(xml).Version == Data.CurrentVersion && !Data.Load(xml).Entries[0].IndependentMovement
             && Directory.GetFiles(root, "v2.xml.v2-*.bak").Length == 1, "explicit legacy reopen survives v2 upgrade and backup");
         Check(PhotoAssignDialog.Preview(vessel, new string[] { "a.jpg", "b.png" }).Contains(" (2).png")
             && PhotoAssignDialog.Preview(vessel, new string[] { "a.jpg" }).Contains(Data.PhotoFileName(vessel, 1, 1, ".jpg")),
             "photo preview follows actual one/multiple-file naming");
+    }
+
+    static void ReviewDomainTests()
+    {
+        Book b = MakeBook(); Entry target = Make(DateTime.Today, false); target.Camera = "ONLY_TARGET"; b.Entries.Add(target);
+        Entry ship = new Entry { Id = Guid.NewGuid().ToString("N"), Time = DateTime.Today.AddHours(1), Title = "A항", Category = "Vessel",
+            Movement = "출항", VesselType = "어선", VesselNumber = "ONLY_VESSEL" }; b.Entries.Add(ship);
+        DateTime at = DateTime.Today.AddHours(2); Data.Arrive(ship, at, "B항");
+        Check(ship.Title == "A항" && ship.ArrivalHarbor == "B항" && ship.FinishedAt == at && ship.Report().Contains("B항"),
+            "arrival keeps independent departure/arrival ports and report");
+        string xml = Path.Combine(root, "arrival.xml"); Data.Save(xml, b);
+        Check(Data.Load(xml).Entries[1].ArrivalHarbor == "B항", "arrival port roundtrip");
+        string targets = Data.ExportDay(b, DateTime.Today); string ships = Data.CsvDayPath(b, DateTime.Today, true);
+        string tc = File.ReadAllText(targets), sc = File.ReadAllText(ships);
+        Check(Path.GetFileName(targets) == "Targets.csv" && Path.GetFileName(ships) == "Vessels.csv"
+            && tc.Contains("ONLY_TARGET") && !tc.Contains("ONLY_VESSEL") && sc.Contains("ONLY_VESSEL") && !sc.Contains("ONLY_TARGET"),
+            "daily CSV files are physically separate by domain");
+        Check(!tc.Contains("선종") && !sc.Contains("방위각") && sc.Contains("입항항") && sc.Contains("B항"),
+            "each CSV uses only its own domain columns");
+        Reject(delegate { Data.ExportEntries(b, b.Entries, Path.Combine(root, "mixed.csv"), true); }, "mixed records refused by vessel export");
+        Data.Reopen(ship); Check(ship.ArrivalHarbor == "" && ship.ArrivalPlace() == "", "reopening clears arrival port");
+        Reject(delegate { Data.Arrive(ship, at, " "); }, "blank arrival harbor rejected");
+        Check(!ship.Complete && !ship.FinishedAt.HasValue, "invalid arrival does not mutate entry");
+        b.Version = 3; ship.Complete = true; ship.FinishedAt = at; ship.ArrivalHarbor = "";
+        string legacy = Path.Combine(root, "v3.xml"); using (FileStream f = File.Create(legacy)) new XmlSerializer(typeof(Book)).Serialize(f, b);
+        Book old = Data.Load(legacy); Check(old.Entries[1].ArrivalPlace() == "A항", "old same-harbor arrival remains readable");
+        Data.Save(legacy, old); Check(Data.Load(legacy).Version == Data.CurrentVersion && Directory.GetFiles(root, "v3.xml.v3-*.bak").Length == 1,
+            "v3 source backed up before arrival-port upgrade");
     }
 
     static List<string[]> ReadCsv(string text)
