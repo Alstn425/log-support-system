@@ -371,144 +371,359 @@ namespace CoastNotebook
         }
     }
 
-    public class ConfigDialog : Form
+    public class WindowsMacroInput : IMacroInput
     {
-        public Settings Value;
-        TextBox name, csv, photos, kinds, alarms, cameras, places, vesselTypes, harbors;
-        CheckBox copy, success;
-        Settings previous;
-
-        public ConfigDialog(Settings current)
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint count, Input[] inputs, int size);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct MouseInput { public int X, Y; public uint Data, Flags, Time; public UIntPtr Extra; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+        struct InputData { [System.Runtime.InteropServices.FieldOffset(0)] public MouseInput Mouse; }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct Input { public uint Type; public InputData Data; }
+        public bool Available { get { return Environment.OSVersion.Platform == PlatformID.Win32NT; } }
+        public bool LeftDown { get { return (GetAsyncKeyState(1) & 0x8000) != 0; } }
+        public bool EscapeDown { get { return (GetAsyncKeyState(27) & 0x8000) != 0; } }
+        public int X { get { return Cursor.Position.X; } }
+        public int Y { get { return Cursor.Position.Y; } }
+        public int DesktopLeft { get { return SystemInformation.VirtualScreen.Left; } }
+        public int DesktopTop { get { return SystemInformation.VirtualScreen.Top; } }
+        public int DesktopWidth { get { return SystemInformation.VirtualScreen.Width; } }
+        public int DesktopHeight { get { return SystemInformation.VirtualScreen.Height; } }
+        public bool Contains(int x, int y) { return SystemInformation.VirtualScreen.Contains(x, y); }
+        public void Click(int x, int y)
         {
-            previous = current; Text = "COAST · 환경설정"; Width = 760; Height = 740;
-            MinimumSize = new Size(720, 500); StartPosition = FormStartPosition.CenterParent; CoastStyle.Form(this);
-            Panel scroll = new Panel(); scroll.Dock = DockStyle.Fill; scroll.AutoScroll = true; Controls.Add(scroll);
-            TableLayoutPanel grid = new TableLayoutPanel(); grid.ColumnCount = 2; grid.RowCount = 2;
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            grid.AutoSize = true; grid.Dock = DockStyle.Top; grid.Padding = new Padding(10); scroll.Controls.Add(grid);
-            FlowLayoutPanel left = SettingsColumn(), right = SettingsColumn(); grid.Controls.Add(left, 0, 0); grid.Controls.Add(right, 1, 0);
-            name = Field(left, "구간 명 (예: 4구간)", current.Name, 25);
-            csv = FolderField(left, "CSV 출력 폴더", current.CsvFolder);
-            photos = FolderField(left, "사진 할당 폴더", current.PhotoFolder);
-            List<string> lines = new List<string>(); foreach (Kind kind in current.Kinds) lines.Add(kind.Name + "|" + kind.Unit);
-            kinds = Field(left, "식별유형: 이름|단위 (/로 하위항목 구분)", String.Join("\r\n", lines.ToArray()), 150);
-            vesselTypes = Field(left, "선박유형: 한 줄에 하나", current.VesselTypes, 90);
-            cameras = Field(right, "카메라|지형지물1,지형지물2 (표시 순서 유지)", current.Cameras, 130);
-            places = Field(right, "공통 지형지물 (이전 설정 호환, 한 줄에 하나)", current.Places, 55);
-            harbors = Field(right, "항구: 북 → 남 순서로 한 줄에 하나", current.Harbors, 75);
-            alarms = Field(right, "알림 일정: HH:mm|업무명 (빈칸이면 없음)", current.Alarms, 100);
-            FlowLayoutPanel footer = SettingsColumn(); footer.Width = 680; grid.Controls.Add(footer, 0, 1); grid.SetColumnSpan(footer, 2);
-            copy = new CheckBox(); copy.Text = "저장 후 보고문 복사"; copy.Checked = current.CopyText; copy.Width = 330; footer.Controls.Add(copy);
-            success = new CheckBox(); success.Text = "저장 결과 팝업 표시"; success.Checked = current.ShowSuccess; success.Width = 330; footer.Controls.Add(success);
-            Label notice = new Label(); notice.Width = 680; notice.Height = 57; notice.ForeColor = CoastStyle.Muted;
-            notice.Text = "사진: 한 장은 번호 없이, 여러 장은 (1), (2)로 표시합니다. 할당 창에서 실제 파일명을 미리 볼 수 있습니다.\r\n"
-                + "유형 이름·단위를 바꾸면 새 유형으로 등록되며 과거 기록은 유지됩니다.\r\nCSV와 사진은 별도 출력 폴더이며 원본 XML은 프로그램의 Data 폴더에 있습니다.";
-            footer.Controls.Add(notice); Button save = CoastStyle.Button("설정 저장", Save, true); save.Width = 680; save.Height = 36; footer.Controls.Add(save);
-        }
-        FlowLayoutPanel SettingsColumn()
-        {
-            FlowLayoutPanel panel = new FlowLayoutPanel(); panel.FlowDirection = FlowDirection.TopDown;
-            panel.WrapContents = false; panel.AutoSize = true; panel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            panel.Width = 340; panel.Dock = DockStyle.Top; return panel;
-        }
-
-        TextBox Field(Control panel, string label, string text, int height)
-        {
-            Label title = new Label(); title.Text = label; title.Width = 330; title.Height = 32;
-            panel.Controls.Add(title);
-            TextBox box = new TextBox(); box.Text = text; box.Width = 330;
-            box.Multiline = height > 30; box.Height = height;
-            if (box.Multiline) box.ScrollBars = ScrollBars.Vertical;
-            CoastStyle.InputControl(box); panel.Controls.Add(box); return box;
-        }
-
-        TextBox FolderField(Control panel, string label, string text)
-        {
-            Label title = new Label(); title.Text = label; title.Width = 330; title.Height = 32;
-            panel.Controls.Add(title);
-            FlowLayoutPanel row = new FlowLayoutPanel(); row.Width = 330; row.Height = 36;
-            row.WrapContents = false; panel.Controls.Add(row);
-            TextBox box = new TextBox(); box.Width = 230; box.Text = text; CoastStyle.InputControl(box); row.Controls.Add(box);
-            Button browse = new Button(); browse.Text = "찾아보기"; browse.Width = 85; browse.Height = 27;
-            browse.Click += delegate
-            {
-                using (FolderBrowserDialog dialog = new FolderBrowserDialog())
-                {
-                    dialog.Description = label + "를 선택하세요.";
-                    dialog.ShowNewFolderButton = true;
-                    if (Directory.Exists(box.Text.Trim())) dialog.SelectedPath = box.Text.Trim();
-                    if (dialog.ShowDialog(this) == DialogResult.OK) box.Text = dialog.SelectedPath;
-                }
+            Cursor.Position = new Point(x, y);
+            Input[] events = new Input[] {
+                new Input { Type = 0, Data = new InputData { Mouse = new MouseInput { Flags = 0x0002 } } },
+                new Input { Type = 0, Data = new InputData { Mouse = new MouseInput { Flags = 0x0004 } } }
             };
-            row.Controls.Add(browse); return box;
+            if (SendInput(2, events, System.Runtime.InteropServices.Marshal.SizeOf(typeof(Input))) != 2)
+                throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error(), "매크로 클릭 전송에 실패했습니다.");
         }
-
-        public static List<string[]> ParseAlarms(string text)
+    }
+    public class MacroOverlay : Form
+    {
+        readonly MacroEngine engine;
+        readonly Font caption = new Font("맑은 고딕", 16F, FontStyle.Bold), number = new Font("맑은 고딕", 10F, FontStyle.Bold);
+        public MacroOverlay(MacroEngine source)
         {
-            List<string[]> result = new List<string[]>();
-            HashSet<string> unique = new HashSet<string>();
-            foreach (string raw in (text ?? "").Split('\n'))
+            engine = source; FormBorderStyle = FormBorderStyle.None; StartPosition = FormStartPosition.Manual;
+            Bounds = SystemInformation.VirtualScreen; BackColor = Color.Black; Opacity = 0.23; TopMost = true; ShowInTaskbar = false;
+        }
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams
+        {
+            get { CreateParams value = base.CreateParams; value.ExStyle |= 0x20 | 0x80000 | 0x08000000; return value; }
+        }
+        protected override void WndProc(ref Message m)
+        { if (m.Msg == 0x84) { m.Result = (IntPtr)(-1); return; } base.WndProc(ref m); }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e); e.Graphics.DrawString("COAST · 클릭 녹화 중\n완료: ESC 또는 COAST의 중지 버튼", caption, Brushes.Yellow, 25, 25);
+            if (engine.Profile == null) return;
+            for (int i = 0; i < engine.Profile.Steps.Count; i++)
             {
-                string line = raw.Trim(); if (line.Length == 0) continue;
-                string[] parts = line.Split(new char[] { '|' }, 2);
-                DateTime parsed;
-                if (parts.Length != 2 || parts[1].Trim().Length == 0
-                    || !DateTime.TryParseExact(parts[0].Trim(), "HH:mm", CultureInfo.InvariantCulture,
-                        DateTimeStyles.None, out parsed) || !unique.Add(line))
-                    throw new FormatException("일정 형식은 HH:mm|일정 이름 입니다. 같은 줄을 중복하지 마세요.");
-                result.Add(new string[] { parts[0].Trim(), parts[1].Trim() });
+                MacroStep step = engine.Profile.Steps[i]; int x = step.X - Left, y = step.Y - Top;
+                e.Graphics.FillEllipse(Brushes.Red, x - 6, y - 6, 12, 12);
+                e.Graphics.DrawString((i + 1).ToString(), number, Brushes.White, x + 9, y - 12);
+            }
+        }
+        protected override void Dispose(bool disposing) { if (disposing) { caption.Dispose(); number.Dispose(); } base.Dispose(disposing); }
+    }
+    public class MacroEditDialog : Form
+    {
+        public MacroProfile Value;
+        readonly MacroProfile original;
+        TextBox name;
+        NumericUpDown delay;
+        DataGridView steps;
+        Label error;
+        public MacroEditDialog(MacroProfile profile, int slot)
+        {
+            original = profile; Text = "매크로 " + (slot + 1) + " · 클릭과 지연 설정"; Size = new Size(690, 560);
+            MinimumSize = new Size(580, 380); StartPosition = FormStartPosition.CenterScreen; CoastStyle.Form(this);
+            TableLayoutPanel top = CoastStyle.Card(); name = new TextBox(); name.Text = profile.Name;
+            delay = new NumericUpDown(); delay.Minimum = 0; delay.Maximum = 600000; delay.Value = profile.DefaultDelayMs;
+            CoastStyle.Add(top, CoastStyle.Row(new Control[] { CoastStyle.Field("슬롯 이름", name), CoastStyle.Field("기본 클릭 후 지연(ms)", delay),
+                CoastStyle.Button("전체에 적용", delegate { foreach (DataGridViewRow row in steps.Rows) if (!row.IsNewRow) row.Cells[2].Value = (int)delay.Value; }) }, 48, 32, 20), 55);
+            Label hint = new Label(); hint.Text = "좌표는 화면 전체 기준입니다. 같은 해상도·화면 배치를 사용하세요. 지연은 각 클릭 후 다음 클릭까지의 대기입니다.";
+            hint.ForeColor = CoastStyle.Muted; CoastStyle.Add(top, hint, 42);
+            steps = CoastStyle.Grid(); steps.ReadOnly = false; steps.AllowUserToAddRows = true; steps.AllowUserToDeleteRows = true;
+            steps.Columns.Add("x", "X 좌표"); steps.Columns.Add("y", "Y 좌표"); steps.Columns.Add("delay", "클릭 후 지연(ms)");
+            foreach (MacroStep step in profile.Steps) steps.Rows.Add(step.X, step.Y, step.DelayMs);
+            TableLayoutPanel footer = CoastStyle.Card(); footer.Dock = DockStyle.Bottom;
+            error = new Label(); error.ForeColor = Color.Salmon; CoastStyle.Add(footer, error, 35);
+            Button cancel = CoastStyle.Button("취소", delegate { DialogResult = DialogResult.Cancel; });
+            CoastStyle.Add(footer, CoastStyle.Row(new Control[] { CoastStyle.Button("선택 클릭 삭제", delegate {
+                foreach (DataGridViewRow row in steps.SelectedRows) if (!row.IsNewRow) steps.Rows.Remove(row);
+            }), cancel, CoastStyle.Button("슬롯 저장", Save, true) }, 34, 26, 40), 36);
+            Controls.Add(steps); Controls.Add(top); Controls.Add(footer); CancelButton = cancel;
+        }
+        void Save(object sender, EventArgs e)
+        {
+            try
+            {
+                steps.EndEdit(); MacroProfile profile = Data.CloneMacro(original); profile.Name = name.Text.Trim();
+                profile.DefaultDelayMs = (int)delay.Value; profile.Steps.Clear();
+                foreach (DataGridViewRow row in steps.Rows)
+                {
+                    if (row.IsNewRow) continue; int x, y, wait;
+                    if (!Int32.TryParse(Convert.ToString(row.Cells[0].Value), out x) || !Int32.TryParse(Convert.ToString(row.Cells[1].Value), out y)
+                        || !Int32.TryParse(Convert.ToString(row.Cells[2].Value), out wait)) throw new FormatException("좌표와 지연은 정수로 입력하세요.");
+                    profile.Steps.Add(new MacroStep { X = x, Y = y, DelayMs = wait });
+                }
+                Data.ValidateMacro(profile); Value = profile; DialogResult = DialogResult.OK;
+            }
+            catch (Exception ex) { error.Text = ex.Message; }
+        }
+    }
+
+    public class TextListEditor : TableLayoutPanel
+    {
+        public readonly List<TextBox> Inputs = new List<TextBox>();
+        readonly List<Control> rows = new List<Control>();
+        readonly Button add;
+        public TextListEditor(IEnumerable<string> values, string addText)
+        {
+            ColumnCount = 1; ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink; Dock = DockStyle.Top;
+            add = CoastStyle.Button(addText, delegate { AddValue(""); });
+            foreach (string value in values) AddValue(value);
+            Controls.Add(add, 0, rows.Count); Reflow();
+        }
+        public void AddValue(string value)
+        {
+            TextBox box = new TextBox(); box.Text = value; CoastStyle.InputControl(box);
+            Button up = CoastStyle.Button("↑", delegate { MoveValue(box, -1); });
+            Button down = CoastStyle.Button("↓", delegate { MoveValue(box, 1); });
+            Button remove = CoastStyle.Button("×", delegate { Remove(box); });
+            Control row = CoastStyle.Row(new Control[] { box, up, down, remove }, 76, 8, 8, 8);
+            Inputs.Add(box); rows.Add(row); Controls.Add(row); Reflow();
+        }
+        public void MoveValue(TextBox box, int delta)
+        {
+            int i = Inputs.IndexOf(box), j = i + delta; if (i < 0 || j < 0 || j >= Inputs.Count) return;
+            TextBox value = Inputs[i]; Inputs[i] = Inputs[j]; Inputs[j] = value;
+            Control row = rows[i]; rows[i] = rows[j]; rows[j] = row; Reflow();
+        }
+        void Remove(TextBox box)
+        {
+            int i = Inputs.IndexOf(box); if (i < 0) return;
+            Control row = rows[i]; rows.RemoveAt(i); Inputs.RemoveAt(i); Controls.Remove(row); row.Dispose(); Reflow();
+        }
+        void Reflow()
+        {
+            SuspendLayout(); RowStyles.Clear(); RowCount = rows.Count + 1;
+            for (int i = 0; i < rows.Count; i++) { RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); SetRow(rows[i], i); rows[i].Dock = DockStyle.Fill; }
+            RowStyles.Add(new RowStyle(SizeType.Absolute, 33));
+            if (Controls.Contains(add)) { SetRow(add, rows.Count); add.Dock = DockStyle.Fill; }
+            ResumeLayout(true);
+        }
+        public List<string> ReadValues()
+        {
+            List<string> result = new List<string>(); HashSet<string> unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (TextBox box in Inputs)
+            {
+                string value = box.Text.Trim();
+                if (value.Length == 0 || value.IndexOfAny(new char[] { '\r', '\n' }) >= 0 || !unique.Add(value))
+                    throw new FormatException("각 입력칸에 이름을 하나씩 입력하고 빈칸·중복 이름을 확인하세요.");
+                result.Add(value);
             }
             return result;
         }
-
+    }
+    public class CameraCardEditor : TableLayoutPanel
+    {
+        public TextBox CameraName;
+        public TextListEditor Places;
+        public CameraCardEditor(CameraSpec camera, EventHandler remove)
+        {
+            ColumnCount = 1; ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink; Dock = DockStyle.Top; Padding = new Padding(10);
+            BackColor = CoastStyle.Panel; Margin = new Padding(5, 7, 5, 7);
+            CameraName = new TextBox(); CameraName.Text = camera.Name;
+            CoastStyle.Add(this, CoastStyle.Row(new Control[] { CoastStyle.Field("카메라 이름", CameraName),
+                CoastStyle.Button("카메라 삭제", remove) }, 80, 20), 49);
+            Label label = new Label(); label.Text = "이 카메라의 지형지물"; label.ForeColor = CoastStyle.Muted; CoastStyle.Add(this, label, 24);
+            Places = new TextListEditor(camera.Places, "+ 지형지물 추가");
+            RowCount++; RowStyles.Add(new RowStyle(SizeType.AutoSize)); Controls.Add(Places, 0, RowCount - 1);
+        }
+        public CameraSpec ReadValue() { return new CameraSpec { Name = CameraName.Text.Trim(), Places = Places.ReadValues() }; }
+    }
+    public class ConfigDialog : Form
+    {
+        public Settings Value;
+        readonly Settings previous;
+        TextBox name, csv, photos;
+        CheckBox copy, success, solarEnabled;
+        DateTimePicker solarDay, bmnt, sunrise, sunset, eent;
+        NumericUpDown riseOffset, setOffset;
+        Label solarPreview, error;
+        TabControl tabs;
+        TableLayoutPanel cameraCards;
+        List<CameraCardEditor> cameras = new List<CameraCardEditor>();
+        TextListEditor harbors, vesselTypes;
+        DataGridView kinds;
+        public ConfigDialog(Settings current)
+        {
+            previous = current; Text = "COAST · 환경설정"; Size = new Size(820, 730); MinimumSize = new Size(740, 520);
+            StartPosition = FormStartPosition.CenterScreen; CoastStyle.Form(this);
+            tabs = new TabControl(); tabs.Dock = DockStyle.Fill; tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+            tabs.ItemSize = new Size(140, 30); tabs.SizeMode = TabSizeMode.Fixed;
+            tabs.DrawItem += delegate(object sender, DrawItemEventArgs e) {
+                using (SolidBrush brush = new SolidBrush(CoastStyle.Panel)) e.Graphics.FillRectangle(brush, e.Bounds);
+                TextRenderer.DrawText(e.Graphics, tabs.TabPages[e.Index].Text, Font, e.Bounds,
+                    tabs.SelectedIndex == e.Index ? CoastStyle.Green : CoastStyle.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            };
+            Controls.Add(tabs);
+            TableLayoutPanel basic = Page("기본");
+            name = new TextBox(); name.Text = current.Name; CoastStyle.Add(basic, CoastStyle.Field("구간 이름", name), 55);
+            csv = Folder(basic, "CSV 저장 폴더", current.CsvFolder); photos = Folder(basic, "사진 할당 폴더", current.PhotoFolder);
+            copy = new CheckBox(); copy.Text = "저장 후 보고문 복사"; copy.Checked = current.CopyText; CoastStyle.Add(basic, copy, 32);
+            success = new CheckBox(); success.Text = "저장 결과 팝업 표시"; success.Checked = current.ShowSuccess; CoastStyle.Add(basic, success, 32);
+            Hint(basic, "원본 XML은 EXE 옆 Data 폴더에 있습니다. 사진·CSV는 위 폴더로 출력합니다.");
+            TableLayoutPanel cameraPage = Page("카메라·지형지물");
+            Hint(cameraPage, "카메라 이름과 그 카메라에 보이는 지형지물을 각각 입력하세요.");
+            cameraCards = CoastStyle.Card(); AutoRow(cameraPage, cameraCards);
+            foreach (CameraSpec spec in Data.Cameras(current)) AddCamera(spec);
+            CoastStyle.Add(cameraPage, CoastStyle.Button("+ 카메라 추가", delegate { AddCamera(new CameraSpec()); }), 35);
+            TableLayoutPanel portPage = Page("항구·선박유형");
+            Hint(portPage, "항구 · 북 → 남 순서로 입력하고 ↑ ↓ 버튼으로 순서를 조절하세요.");
+            harbors = new TextListEditor(Data.Lines(current.Harbors), "+ 항구 추가"); AutoRow(portPage, harbors);
+            Hint(portPage, "선박유형"); vesselTypes = new TextListEditor(Data.Lines(current.VesselTypes), "+ 선박유형 추가"); AutoRow(portPage, vesselTypes);
+            TableLayoutPanel typePage = Page("식별유형");
+            Hint(typePage, "유형명과 단위를 별도 칸에 입력합니다. 채집/해루질처럼 /로 묶으면 기록 화면에서는 각각 선택합니다.");
+            kinds = CoastStyle.Grid(); kinds.ReadOnly = false; kinds.AllowUserToAddRows = true; kinds.AllowUserToDeleteRows = true;
+            kinds.EditMode = DataGridViewEditMode.EditOnEnter; kinds.Columns.Add("name", "유형명 (묶음은 /로 구분)"); kinds.Columns.Add("unit", "단위");
+            kinds.Columns[0].FillWeight = 80; kinds.Columns[1].FillWeight = 20;
+            foreach (Kind kind in current.Kinds) { int row = kinds.Rows.Add(kind.Name, kind.Unit); kinds.Rows[row].Tag = kind.Id; }
+            CoastStyle.Add(typePage, kinds, 340);
+            CoastStyle.Add(typePage, CoastStyle.Button("선택한 유형 삭제", delegate {
+                foreach (DataGridViewRow row in kinds.SelectedRows) if (!row.IsNewRow) kinds.Rows.Remove(row);
+            }), 34);
+            BuildSolar(Page("기상·알림"), current.Solar);
+            TableLayoutPanel footer = CoastStyle.Card(); footer.Dock = DockStyle.Bottom;
+            error = new Label(); error.ForeColor = Color.Salmon; CoastStyle.Add(footer, error, 34);
+            Button cancel = CoastStyle.Button("취소", delegate { DialogResult = DialogResult.Cancel; });
+            CoastStyle.Add(footer, CoastStyle.Row(new Control[] { cancel, CoastStyle.Button("설정 저장", Save, true) }, 30, 70), 38);
+            Controls.Add(footer); CancelButton = cancel;
+        }
+        TableLayoutPanel Page(string text)
+        {
+            TabPage page = new TabPage(text); page.BackColor = CoastStyle.Background; page.ForeColor = CoastStyle.Text; page.AutoScroll = true;
+            tabs.TabPages.Add(page); TableLayoutPanel card = CoastStyle.Card(); page.Controls.Add(card); return card;
+        }
+        static void AutoRow(TableLayoutPanel parent, Control child)
+        { int row = parent.RowCount++; parent.RowStyles.Add(new RowStyle(SizeType.AutoSize)); child.Dock = DockStyle.Top; parent.Controls.Add(child, 0, row); }
+        static void Hint(TableLayoutPanel parent, string text)
+        { Label label = new Label(); label.Text = text; label.ForeColor = CoastStyle.Muted; CoastStyle.Add(parent, label, 44); }
+        TextBox Folder(TableLayoutPanel parent, string caption, string value)
+        {
+            TextBox box = new TextBox(); box.Text = value;
+            Button browse = CoastStyle.Button("폴더 선택…", delegate {
+                using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+                { if (Directory.Exists(box.Text)) dialog.SelectedPath = box.Text; if (dialog.ShowDialog(this) == DialogResult.OK) box.Text = dialog.SelectedPath; }
+            });
+            CoastStyle.Add(parent, CoastStyle.Row(new Control[] { CoastStyle.Field(caption, box), browse }, 80, 20), 56); return box;
+        }
+        public void AddCamera(CameraSpec spec)
+        {
+            CameraCardEditor card = null;
+            card = new CameraCardEditor(spec, delegate { cameras.Remove(card); cameraCards.Controls.Remove(card); card.Dispose(); ReflowCameras(); });
+            cameras.Add(card); cameraCards.Controls.Add(card); ReflowCameras();
+        }
+        void ReflowCameras()
+        {
+            cameraCards.SuspendLayout(); cameraCards.RowStyles.Clear(); cameraCards.RowCount = cameras.Count;
+            for (int i = 0; i < cameras.Count; i++) { cameraCards.RowStyles.Add(new RowStyle(SizeType.AutoSize)); cameraCards.SetRow(cameras[i], i); }
+            cameraCards.ResumeLayout(true);
+        }
+        DateTimePicker SolarTime(string value)
+        {
+            DateTimePicker picker = new DateTimePicker(); picker.Format = DateTimePickerFormat.Custom; picker.CustomFormat = "HH:mm";
+            picker.ShowUpDown = true; picker.ShowCheckBox = true; picker.Value = DateTime.Today;
+            if (!String.IsNullOrEmpty(value)) picker.Value = DateTime.Today.Add(DateTime.ParseExact(value, "HH:mm", CultureInfo.InvariantCulture).TimeOfDay);
+            picker.Checked = !String.IsNullOrEmpty(value); picker.ValueChanged += SolarChanged; return picker;
+        }
+        void BuildSolar(TableLayoutPanel page, SolarSettings current)
+        {
+            Hint(page, "기상제원 입력 · 입력한 날짜의 시각만 사용합니다. 고정 시각 알람은 Windows 알람을 사용하세요.");
+            solarDay = new DateTimePicker(); solarDay.Format = DateTimePickerFormat.Short; solarDay.Value = current.Date;
+            CoastStyle.Add(page, CoastStyle.Field("적용 날짜", solarDay), 54);
+            bmnt = SolarTime(current.Bmnt); sunrise = SolarTime(current.Sunrise); sunset = SolarTime(current.Sunset); eent = SolarTime(current.Eent);
+            CoastStyle.Add(page, CoastStyle.Row(new Control[] { CoastStyle.Field("BMNT", bmnt), CoastStyle.Field("일출", sunrise),
+                CoastStyle.Field("일몰", sunset), CoastStyle.Field("EENT", eent) }, 25, 25, 25, 25), 56);
+            Hint(page, "시각을 모르면 체크를 해제합니다. BMNT·EENT는 참고 시각이며 교대 알람은 일출·일몰을 기준으로 합니다.");
+            solarEnabled = new CheckBox(); solarEnabled.Text = "주야간 교대 알람 활성화"; solarEnabled.Checked = current.Enabled; CoastStyle.Add(page, solarEnabled, 32);
+            riseOffset = new NumericUpDown(); riseOffset.Minimum = -720; riseOffset.Maximum = 720; riseOffset.Value = current.SunriseOffset;
+            setOffset = new NumericUpDown(); setOffset.Minimum = -720; setOffset.Maximum = 720; setOffset.Value = current.SunsetOffset;
+            CoastStyle.Add(page, CoastStyle.Row(new Control[] { CoastStyle.Field("일출 기준 ±분", riseOffset), CoastStyle.Field("일몰 기준 ±분", setOffset) }, 50, 50), 54);
+            Hint(page, "음수: 기준 시각 전 / 양수: 기준 시각 후 · 프로그램 실행 중 알림이 동작합니다.");
+            solarPreview = new Label(); solarPreview.ForeColor = CoastStyle.Green; CoastStyle.Add(page, solarPreview, 60);
+            CoastStyle.Add(page, CoastStyle.Button("알람 시험", delegate { System.Media.SystemSounds.Exclamation.Play();
+                MessageBox.Show(this, "주야간 교대 알람 시험입니다.", "알람 시험"); }), 35);
+            solarDay.ValueChanged += SolarChanged; solarEnabled.CheckedChanged += SolarChanged;
+            riseOffset.ValueChanged += SolarChanged; setOffset.ValueChanged += SolarChanged; SolarChanged(null, EventArgs.Empty);
+        }
+        static string TimeValue(DateTimePicker picker) { return picker.Checked ? picker.Value.ToString("HH:mm") : ""; }
+        SolarSettings ReadSolar()
+        { return new SolarSettings { Date = solarDay.Value.Date, Bmnt = TimeValue(bmnt), Sunrise = TimeValue(sunrise), Sunset = TimeValue(sunset), Eent = TimeValue(eent),
+            Enabled = solarEnabled.Checked, SunriseOffset = (int)riseOffset.Value, SunsetOffset = (int)setOffset.Value }; }
+        void SolarChanged(object sender, EventArgs e)
+        {
+            if (solarPreview == null) return;
+            try
+            {
+                SolarSettings solar = ReadSolar(); List<string> lines = new List<string>();
+                foreach (SolarAlarm alarm in Data.SolarAlarms(solar)) lines.Add(alarm.Title + " · " + alarm.At.ToString("MM-dd HH:mm"));
+                solarPreview.Text = lines.Count == 0 ? "교대 알람 비활성화" : String.Join("\r\n", lines.ToArray());
+            }
+            catch (Exception ex) { solarPreview.Text = ex.Message; }
+        }
         public static void Validate(Settings settings)
         {
             if (settings == null || !settings.Configured || String.IsNullOrWhiteSpace(settings.Name)
                 || String.IsNullOrWhiteSpace(settings.CsvFolder) || !Path.IsPathRooted(settings.CsvFolder)
                 || String.IsNullOrWhiteSpace(settings.PhotoFolder) || !Path.IsPathRooted(settings.PhotoFolder)
                 || settings.Kinds == null || settings.Kinds.Count == 0 || settings.Kinds.Count > 50)
-                throw new FormatException("이름, 출력 폴더와 1~50개의 항목을 설정하세요.");
-            HashSet<string> ids = new HashSet<string>();
-            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                throw new FormatException("구간명, 폴더와 1~50개의 유형을 확인하세요.");
+            HashSet<string> ids = new HashSet<string>(), names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (Kind kind in settings.Kinds)
             {
                 if (kind == null || String.IsNullOrWhiteSpace(kind.Name) || String.IsNullOrWhiteSpace(kind.Id)
-                    || !ids.Add(kind.Id) || !names.Add(kind.Name) || String.IsNullOrWhiteSpace(kind.Unit))
-                    throw new FormatException("유형 이름, 단위와 ID를 확인하세요. 유형 이름은 중복할 수 없습니다.");
+                    || !ids.Add(kind.Id) || !names.Add(kind.Name) || String.IsNullOrWhiteSpace(kind.Unit)) throw new FormatException("유형 이름·단위와 중복 여부를 확인하세요.");
                 HashSet<string> children = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (string child in kind.Choices())
-                    if (child.Length == 0 || !children.Add(child))
-                        throw new FormatException("/ 사이의 하위항목은 비어 있거나 중복될 수 없습니다.");
+                foreach (string child in kind.Choices()) if (child.Length == 0 || !children.Add(child)) throw new FormatException("/ 사이의 유형은 비어 있거나 중복될 수 없습니다.");
             }
-            ParseAlarms(settings.Alarms); Data.Cameras(settings);
+            Data.Cameras(settings); Data.ValidateSolar(settings.Solar);
+            if (settings.Macros == null || settings.Macros.Length != 2) throw new FormatException("매크로 슬롯은 2개입니다.");
+            foreach (MacroProfile macro in settings.Macros) Data.ValidateMacro(macro);
         }
-
         void Save(object sender, EventArgs e)
         {
             try
             {
-                Settings settings = new Settings(); settings.Configured = true;
-                settings.Name = name.Text.Trim(); settings.CsvFolder = csv.Text.Trim();
-                settings.PhotoFolder = photos.Text.Trim(); settings.CopyText = copy.Checked;
-                settings.ShowSuccess = success.Checked; settings.Alarms = alarms.Text;
-                settings.Cameras = cameras.Text; settings.Places = places.Text; settings.Harbors = harbors.Text;
-                settings.VesselTypes = vesselTypes.Text;
-                foreach (string raw in kinds.Text.Split('\n'))
+                kinds.EndEdit(); Settings settings = Data.Clone(new Book { Settings = previous }).Settings;
+                settings.Configured = true; settings.Name = name.Text.Trim(); settings.CsvFolder = csv.Text.Trim(); settings.PhotoFolder = photos.Text.Trim();
+                settings.CopyText = copy.Checked; settings.ShowSuccess = success.Checked; settings.Alarms = "";
+                settings.StructuredCameras = true; settings.CameraDefinitions.Clear();
+                foreach (CameraCardEditor card in cameras) settings.CameraDefinitions.Add(card.ReadValue());
+                settings.Cameras = ""; settings.Places = "";
+                settings.Harbors = String.Join("\r\n", harbors.ReadValues().ToArray()); settings.VesselTypes = String.Join("\r\n", vesselTypes.ReadValues().ToArray());
+                settings.Kinds.Clear();
+                foreach (DataGridViewRow row in kinds.Rows)
                 {
-                    string line = raw.Trim(); if (line.Length == 0) continue;
-                    string[] parts = line.Split('|');
-                    if (parts.Length != 2 || parts[0].Trim().Length == 0 || parts[1].Trim().Length == 0)
-                        throw new FormatException("항목은 한 줄에 이름|단위로 입력하세요.");
-                    Kind kind = new Kind(); kind.Name = parts[0].Trim(); kind.Unit = parts[1].Trim();
-                    kind.Id = Guid.NewGuid().ToString("N");
-                    foreach (Kind old in previous.Kinds)
-                        if (old.Name == kind.Name && old.Unit == kind.Unit) kind.Id = old.Id;
+                    if (row.IsNewRow) continue;
+                    string title = Convert.ToString(row.Cells[0].Value).Trim(), unit = Convert.ToString(row.Cells[1].Value).Trim();
+                    Kind kind = new Kind { Id = Guid.NewGuid().ToString("N"), Name = title, Unit = unit };
+                    foreach (Kind old in previous.Kinds) if (old.Name == title && old.Unit == unit) kind.Id = old.Id;
                     settings.Kinds.Add(kind);
                 }
-                Validate(settings);
-                Value = settings; DialogResult = DialogResult.OK;
+                settings.Solar = ReadSolar(); Validate(settings); Value = settings; DialogResult = DialogResult.OK;
             }
-            catch (Exception ex) { MessageBox.Show(this, ex.Message, "설정 확인"); }
+            catch (Exception ex) { error.Text = ex.Message; }
         }
     }
+
 }

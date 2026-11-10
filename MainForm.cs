@@ -14,12 +14,23 @@ namespace CoastNotebook
         Book book, undoBefore;
         string editing = "", selected = "", exportError = "";
         bool dirty, boatDirty, loading, busy, closing, filtering;
-        DateTime promptedDate;
         readonly System.ComponentModel.IContainer components = new System.ComponentModel.Container();
         Panel editor;
         FlowLayoutPanel page;
         TableLayoutPanel targetCard;
-        ContextMenuStrip toolsMenu, recordMenu;
+        ContextMenuStrip toolsMenu, recordMenu, macroMenu;
+        MacroEngine macroEngine;
+        Timer macroTimer;
+        Stopwatch macroWatch = Stopwatch.StartNew();
+        MacroOverlay macroOverlay;
+        int recordingSlot = -1;
+        bool processingRecording;
+        Button macroOne, macroTwo, macroStop, macroManage, settingsButton;
+        Control macroBar;
+        bool targetTimeManual, boatTimeManual, targetDatePinned, boatDatePinned;
+        string numberEditingId = "";
+        bool numberCancelled;
+        Dictionary<string, string> numberDrafts = new Dictionary<string, string>();
         int peopleHeight, boatHeight;
         DateTimePicker date, boatTime, targetDay, boatDay;
         ComboBox camera, title, kind, harbor, vesselType;
@@ -48,7 +59,8 @@ namespace CoastNotebook
 
         public MainForm(string folder)
         {
-            tips = new ToolTip(components); toolsMenu = new ContextMenuStrip(components); recordMenu = new ContextMenuStrip(components);
+            tips = new ToolTip(components); toolsMenu = new ContextMenuStrip(components); recordMenu = new ContextMenuStrip(components); macroMenu = new ContextMenuStrip(components);
+            macroEngine = new MacroEngine(new WindowsMacroInput());
             dataPath = Path.Combine(folder, "Records.xml"); book = Data.Load(dataPath);
             if (book.Settings.Kinds == null) book.Settings.Kinds = new List<Kind>();
             if (!book.Settings.Configured)
@@ -68,21 +80,27 @@ namespace CoastNotebook
             MinimumSize = new Size(420, Math.Min(600, area.Height));
             TableLayoutPanel root = new TableLayoutPanel(); root.Dock = DockStyle.Fill;
             root.ColumnCount = 1; root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            root.RowCount = 3; root.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
+            root.RowCount = 4; root.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 35)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
             Controls.Add(root);
             Label brand = new Label(); brand.Text = "COAST · " + book.Settings.Name;
             brand.Font = new Font(Font.FontFamily, 12F, FontStyle.Bold); brand.TextAlign = ContentAlignment.MiddleLeft;
             brand.Name = "brand";
-            Button settings = CoastStyle.Button("설정 ⋯", ShowTools);
-            root.Controls.Add(CoastStyle.Row(new Control[] { brand, settings }, 78, 22), 0, 0);
+            settingsButton = CoastStyle.Button("설정 ⋯", ShowTools);
+            root.Controls.Add(CoastStyle.Row(new Control[] { brand, settingsButton }, 78, 22), 0, 0);
             root.GetControlFromPosition(0, 0).Dock = DockStyle.Fill;
+            macroOne = CoastStyle.Button("▶ 매크로 1", delegate { PlayMacro(0); });
+            macroTwo = CoastStyle.Button("▶ 매크로 2", delegate { PlayMacro(1); });
+            macroManage = CoastStyle.Button("녹화·설정 ▾", ShowMacroMenu);
+            macroStop = CoastStyle.Button("중지", delegate { StopMacro(true); });
+            macroBar = CoastStyle.Row(new Control[] { macroOne, macroTwo, macroManage, macroStop }, 30, 30, 28, 12);
+            macroBar.Dock = DockStyle.Fill; macroBar.Margin = Padding.Empty; root.Controls.Add(macroBar, 0, 1);
             page = new FlowLayoutPanel(); page.Dock = DockStyle.Fill; page.FlowDirection = FlowDirection.TopDown;
             page.WrapContents = false; page.AutoScroll = true; page.Padding = new Padding(1);
-            editor = page; root.Controls.Add(page, 0, 1);
+            editor = page; root.Controls.Add(page, 0, 2);
             TableLayoutPanel boatCard = BuildBoatCard(); targetCard = BuildTargetCard();
             peoplePanel = BuildList(false); boatPanel = BuildList(true);
-            peopleHeight = boatHeight = Math.Max(145, (ClientSize.Height - 84 - 415) / 2);
+            peopleHeight = boatHeight = Math.Max(145, (ClientSize.Height - 119 - 415) / 2);
             peoplePanel.Height = peopleHeight; boatPanel.Height = boatHeight;
             foreach (Control control in new Control[] { targetCard, peoplePanel, boatCard, boatPanel })
             { control.Dock = DockStyle.None; control.Margin = new Padding(5, 3, 5, 3); page.Controls.Add(control); }
@@ -91,15 +109,24 @@ namespace CoastNotebook
             status = new Label(); status.ForeColor = CoastStyle.Muted; status.TextAlign = ContentAlignment.MiddleLeft;
             undoButton = CoastStyle.Button("실행 취소", UndoLast); undoButton.Enabled = false;
             Control footer = CoastStyle.Row(new Control[] { status, undoButton }, 79, 21); footer.Dock = DockStyle.Fill;
-            root.Controls.Add(footer, 0, 2);
+            root.Controls.Add(footer, 0, 3);
             FormClosing += ConfirmClosing; Shown += Started;
-            clock = new Timer(components); clock.Interval = 15000; clock.Tick += Tick;
+            clock = new Timer(components); clock.Interval = 1000; clock.Tick += Tick;
 
-            LoadKinds(); ResetEditor(); ResetBoat();
+            macroTimer = new Timer(components); macroTimer.Interval = 20; macroTimer.Tick += MacroTick; macroTimer.Start();
+            LoadKinds(); ResetEditor(); ResetBoat(); UpdateMacroUi();
         }
 
         protected override void Dispose(bool disposing)
-        { if (disposing) components.Dispose(); base.Dispose(disposing); }
+        {
+            if (disposing)
+            {
+                if (macroTimer != null) macroTimer.Stop();
+                if (macroOverlay != null) { macroOverlay.Close(); macroOverlay.Dispose(); macroOverlay = null; }
+                components.Dispose();
+            }
+            base.Dispose(disposing);
+        }
         void SizePage()
         {
             int width = Math.Max(350, page.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 12);
@@ -117,6 +144,183 @@ namespace CoastNotebook
         }
         static DateTime At(DateTimePicker day, DateTimePicker time) { return day.Value.Date.Add(time.Value.TimeOfDay); }
         static DateTime MinuteNow() { DateTime now = DateTime.Now; return now.Date.AddHours(now.Hour).AddMinutes(now.Minute); }
+        Control TimeField(DateTimePicker picker, bool vessel)
+        {
+            Button now = CoastStyle.Button("지금", delegate { SetCurrentTime(vessel, DateTime.Now); });
+            now.Font = new Font(Font.FontFamily, 8F); tips.SetToolTip(now, "현재 시각으로 맞춤 · 수동으로 수정한 시각은 이 버튼을 누를 때까지 유지");
+            Control line = CoastStyle.Row(new Control[] { picker, now }, 70, 30);
+            Control field = CoastStyle.Field("시간", line);
+            line.Margin = Padding.Empty; picker.Margin = Padding.Empty; now.Margin = Padding.Empty;
+            return field;
+        }
+        static DateTime MinuteOf(DateTime now) { return now.Date.AddHours(now.Hour).AddMinutes(now.Minute); }
+        void SetCurrentTime(bool vessel, DateTime now)
+        {
+            bool before = loading; loading = true;
+            if (vessel)
+            { boatTime.Value = MinuteOf(now); if (!boatDatePinned) boatDay.Value = now.Date; boatTimeManual = false; boatDirty = true; }
+            else
+            { date.Value = MinuteOf(now); if (editing.Length == 0 && !targetDatePinned) targetDay.Value = now.Date; targetTimeManual = false; dirty = true; }
+            loading = before;
+        }
+        void AdvanceClock(DateTime now)
+        {
+            bool before = loading; loading = true;
+            if (editing.Length == 0)
+            {
+                if (!targetDatePinned && targetDay.Value.Date != now.Date) targetDay.Value = now.Date;
+                if (!targetTimeManual && date.Value != MinuteOf(now)) date.Value = MinuteOf(now);
+            }
+            if (!boatDatePinned && boatDay.Value.Date != now.Date) boatDay.Value = now.Date;
+            if (!boatTimeManual && boatTime.Value != MinuteOf(now)) boatTime.Value = MinuteOf(now);
+            loading = before;
+        }
+        string NumberValue(Entry entry)
+        { string value; return numberDrafts.TryGetValue(entry.Id, out value) ? value : entry.VesselNumber; }
+        void NumberBeginEdit(object sender, DataGridViewCellCancelEventArgs e)
+        {
+            Entry entry = boatGrid.Rows[e.RowIndex].Tag as Entry;
+            if (entry == null || boatGrid.Columns[e.ColumnIndex].Name != "c1") { e.Cancel = true; return; }
+            numberEditingId = entry.Id; selected = entry.Id; numberCancelled = false;
+        }
+        void NumberEditingControl(object sender, DataGridViewEditingControlShowingEventArgs e)
+        {
+            TextBox box = e.Control as TextBox; if (box == null) return;
+            box.MaxLength = 128; box.KeyDown -= NumberKeyDown; box.KeyDown += NumberKeyDown;
+        }
+        void NumberKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape)
+            {
+                numberCancelled = true; numberDrafts.Remove(numberEditingId); boatGrid.CancelEdit(); numberEditingId = "";
+                BeginInvoke((MethodInvoker)delegate { if (!IsDisposed) RefreshRecords(); });
+                e.Handled = true; e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.Enter)
+            { boatGrid.EndEdit(); boatGrid.Focus(); e.Handled = true; e.SuppressKeyPress = true; }
+        }
+        void NumberEndEdit(object sender, DataGridViewCellEventArgs e)
+        {
+            string id = numberEditingId; numberEditingId = "";
+            if (numberCancelled || id.Length == 0 || e.RowIndex < 0) return;
+            string value = Convert.ToString(boatGrid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value).Trim();
+            Entry original = Find(book, id); if (original == null) return;
+            if (original.VesselNumber == value) { numberDrafts.Remove(id); return; }
+            numberDrafts[id] = value;
+            BeginInvoke((MethodInvoker)delegate { SaveNumberDraft(id, value); });
+        }
+        bool savingNumber;
+        void SaveNumberDraft(string id, string value)
+        {
+            if (IsDisposed || Disposing) return; string current;
+            if (!numberDrafts.TryGetValue(id, out current) || current != value) return;
+            Entry entry = Find(Data.Clone(book), id); if (entry == null) { numberDrafts.Remove(id); return; }
+            entry.VesselNumber = value; savingNumber = true;
+            try
+            {
+                if (StoreEntry(entry, "식별번호 저장 완료")) numberDrafts.Remove(id);
+                else status.Text = "식별번호 저장 실패 · 입력 보존 · 번호 칸에서 Enter로 재시도, ESC로 취소";
+            }
+            finally { savingNumber = false; }
+            RefreshRecords();
+        }
+        void ShowMacroMenu(object sender, EventArgs e)
+        {
+            if (macroEngine.Mode != MacroMode.Idle || processingRecording) return;
+            if (macroMenu.Items.Count == 0)
+            {
+                macroMenu.Items.Add("매크로 1 녹화", null, delegate { RecordMacro(0); });
+                macroMenu.Items.Add("매크로 2 녹화", null, delegate { RecordMacro(1); });
+                macroMenu.Items.Add("매크로 1 편집·지연 설정", null, delegate { EditMacro(0, null); });
+                macroMenu.Items.Add("매크로 2 편집·지연 설정", null, delegate { EditMacro(1, null); });
+            }
+            macroMenu.Show((Control)sender, new Point(0, ((Control)sender).Height));
+        }
+        void UpdateMacroUi()
+        {
+            bool active = macroEngine.Mode != MacroMode.Idle;
+            bool waiting = processingRecording || macroEngine.RecordingFinished;
+            macroOne.Text = "▶ " + (book.Settings.Macros[0].Name.Length == 0 ? "매크로 1" : book.Settings.Macros[0].Name);
+            macroTwo.Text = "▶ " + (book.Settings.Macros[1].Name.Length == 0 ? "매크로 2" : book.Settings.Macros[1].Name);
+            macroOne.AutoEllipsis = true; macroTwo.AutoEllipsis = true;
+            macroOne.Enabled = !active && !waiting && book.Settings.Macros[0].Steps.Count > 0;
+            macroTwo.Enabled = !active && !waiting && book.Settings.Macros[1].Steps.Count > 0;
+            macroStop.Enabled = active; macroManage.Enabled = !active && !waiting; settingsButton.Enabled = !active && !waiting;
+            editor.Enabled = !active;
+            tips.SetToolTip(macroOne, "슬롯 1 · " + book.Settings.Macros[0].Steps.Count + "개 클릭");
+            tips.SetToolTip(macroTwo, "슬롯 2 · " + book.Settings.Macros[1].Steps.Count + "개 클릭");
+        }
+        int macroGeneration;
+        void RecordMacro(int slot)
+        {
+            try
+            {
+                macroGeneration++; MacroProfile profile = book.Settings.Macros[slot];
+                macroEngine.AllowRecording = delegate(int x, int y) { return !macroBar.RectangleToScreen(macroBar.ClientRectangle).Contains(x, y); };
+                macroEngine.StartRecording(profile.Name, profile.DefaultDelayMs, macroWatch.ElapsedMilliseconds); recordingSlot = slot;
+                macroOverlay = new MacroOverlay(macroEngine); macroOverlay.Show(); UpdateMacroUi(); status.Text = macroEngine.Status;
+            }
+            catch (Exception ex) { StopMacro(false); status.Text = ex.Message; }
+        }
+        void PlayMacro(int slot)
+        {
+            try
+            {
+                if (processingRecording || macroEngine.RecordingFinished) return;
+                macroGeneration++; macroEngine.StartPlaying(book.Settings.Macros[slot], macroWatch.ElapsedMilliseconds);
+                UpdateMacroUi(); status.Text = macroEngine.Status;
+            }
+            catch (Exception ex) { status.Text = ex.Message; }
+        }
+        void CloseMacroOverlay()
+        { if (macroOverlay != null) { macroOverlay.Close(); macroOverlay.Dispose(); macroOverlay = null; } }
+        void StopMacro(bool keepRecording)
+        {
+            if (!keepRecording) macroGeneration++;
+            macroEngine.Stop(keepRecording); CloseMacroOverlay(); UpdateMacroUi(); status.Text = macroEngine.Status;
+        }
+        void MacroTick(object sender, EventArgs e)
+        {
+            try
+            {
+                MacroMode before = macroEngine.Mode; macroEngine.Tick(macroWatch.ElapsedMilliseconds);
+                if (before != MacroMode.Idle) status.Text = macroEngine.Status;
+                if (macroOverlay != null) macroOverlay.Invalidate();
+                if (before != MacroMode.Idle && macroEngine.Mode == MacroMode.Idle) { CloseMacroOverlay(); UpdateMacroUi(); }
+                if (macroEngine.RecordingFinished && !macroEngine.EscapeHeld && !processingRecording && !ContainsModal())
+                {
+                    MacroProfile profile = Data.CloneMacro(macroEngine.Profile); macroEngine.ConsumeRecording();
+                    int slot = recordingSlot, generation = macroGeneration; processingRecording = true; UpdateMacroUi();
+                    BeginInvoke((MethodInvoker)delegate {
+                        try
+                        {
+                            if (IsDisposed || generation != macroGeneration) return;
+                            if (profile.Steps.Count == 0) { status.Text = "녹화한 클릭이 없어 기존 슬롯을 유지했습니다."; return; }
+                            EditMacro(slot, profile);
+                        }
+                        finally { processingRecording = false; if (!IsDisposed) UpdateMacroUi(); }
+                    });
+                }
+            }
+            catch (Exception ex) { StopMacro(false); status.Text = "매크로 중지: " + ex.Message; }
+        }
+        void EditMacro(int slot, MacroProfile recorded)
+        {
+            if (macroEngine.Mode != MacroMode.Idle) return;
+            using (MacroEditDialog dialog = new MacroEditDialog(recorded ?? Data.CloneMacro(book.Settings.Macros[slot]), slot))
+            {
+                while (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    try
+                    {
+                        Book next = Data.Clone(book); next.Settings.Macros[slot] = Data.CloneMacro(dialog.Value); Persist(next);
+                        status.Text = "매크로 " + (slot + 1) + " 저장 완료"; UpdateMacroUi(); break;
+                    }
+                    catch (Exception ex) { Error(ex); status.Text = "매크로 저장 실패 · 기존 슬롯 보존"; }
+                }
+            }
+        }
+
         ComboBox Choice()
         { ComboBox box = new ComboBox(); CoastStyle.InputControl(box); box.FlatStyle = FlatStyle.Flat; return box; }
         DateTimePicker TimeInput()
@@ -130,7 +334,7 @@ namespace CoastNotebook
             Button history = CoastStyle.Button("조회", delegate { OpenHistory(false); }); targetDay = DayInput();
             CoastStyle.Add(card, CoastStyle.Row(new Control[] { targetTitle, history, targetDay, cancelEdit }, 31, 13, 34, 22), 38);
             date = TimeInput(); camera = Choice(); title = Choice();
-            CoastStyle.Add(card, CoastStyle.Row(new Control[] { CoastStyle.Field("시간", date),
+            CoastStyle.Add(card, CoastStyle.Row(new Control[] { TimeField(date, false),
                 CoastStyle.Field("카메라", camera), CoastStyle.Field("지형지물 · 생략 가능", title) }, 26, 35, 39), 48);
             kind = Choice(); kind.DropDownStyle = ComboBoxStyle.DropDownList;
             azimuth = new TextBox(); elevation = new TextBox();
@@ -151,8 +355,11 @@ namespace CoastNotebook
             camera.SelectedIndexChanged += delegate { if (!loading) LoadLocations(false); };
             camera.Leave += delegate { if (!loading) LoadLocations(true); };
             foreach (Control control in new Control[] { camera, title, azimuth, elevation, note }) control.TextChanged += MarkDirty;
-            date.ValueChanged += MarkDirty; quantity.ValueChanged += MarkDirty;
-            kind.SelectedIndexChanged += MarkDirty; targetDay.ValueChanged += MarkDirty;
+            date.ValueChanged += delegate(object sender, EventArgs e) { if (!loading) targetTimeManual = true; MarkDirty(sender, e); };
+            date.Enter += delegate { if (!loading) targetTimeManual = true; };
+            quantity.ValueChanged += MarkDirty;
+            kind.SelectedIndexChanged += MarkDirty;
+            targetDay.ValueChanged += delegate(object sender, EventArgs e) { if (!loading) targetDatePinned = targetDay.Value.Date != DateTime.Today; MarkDirty(sender, e); };
             return card;
         }
         TableLayoutPanel BuildBoatCard()
@@ -161,7 +368,7 @@ namespace CoastNotebook
             boatDay = DayInput(); Button history = CoastStyle.Button("조회", delegate { OpenHistory(true); });
             CoastStyle.Add(card, CoastStyle.Row(new Control[] { Heading("선박 입출항"), history, boatDay }, 42, 14, 44), 38);
             boatTime = TimeInput(); harbor = Choice(); vesselType = Choice();
-            CoastStyle.Add(card, CoastStyle.Row(new Control[] { CoastStyle.Field("시간", boatTime),
+            CoastStyle.Add(card, CoastStyle.Row(new Control[] { TimeField(boatTime, true),
                 CoastStyle.Field("항구 · 북 → 남", harbor), CoastStyle.Field("선박유형", vesselType) }, 26, 35, 39), 48);
             vesselName = new TextBox(); vesselNumber = new TextBox();
             CoastStyle.Add(card, CoastStyle.Row(new Control[] { CoastStyle.Field("선명 · 선택", vesselName),
@@ -171,8 +378,9 @@ namespace CoastNotebook
             CoastStyle.Add(card, CoastStyle.Row(new Control[] { depart, arrive }, 50, 50), 34);
             foreach (Control control in new Control[] { harbor, vesselType, vesselName, vesselNumber })
                 control.TextChanged += delegate { if (!loading) boatDirty = true; };
-            boatDay.ValueChanged += delegate { if (!loading) boatDirty = true; };
-            boatTime.ValueChanged += delegate { if (!loading) boatDirty = true; };
+            boatDay.ValueChanged += delegate { if (!loading) { boatDirty = true; boatDatePinned = boatDay.Value.Date != DateTime.Today; } };
+            boatTime.ValueChanged += delegate { if (!loading) { boatDirty = true; boatTimeManual = true; } };
+            boatTime.Enter += delegate { if (!loading) boatTimeManual = true; };
             return card;
         }
         Panel BuildList(bool vessel)
@@ -200,6 +408,7 @@ namespace CoastNotebook
                 grid.Columns.Add(key, names[i]); grid.Columns[i].SortMode = DataGridViewColumnSortMode.NotSortable;
                 grid.Columns[i].FillWeight = key == "action" ? 45 : key == "menu" ? 26 : vessel ? 75 : i == 1 || i == 2 ? 120 : 70;
                 grid.Columns[i].MinimumWidth = key == "menu" ? 25 : key == "action" ? 40 : 45;
+                if (vessel) grid.Columns[i].ReadOnly = key != "c1";
             }
             grid.CellClick += GridClick; grid.CellMouseDown += GridMouseDown;
             grid.RowPrePaint += delegate(object sender, DataGridViewRowPrePaintEventArgs e) {
@@ -212,7 +421,10 @@ namespace CoastNotebook
             };
             if (vessel)
             {
-                boatGrid = grid; grid.Scroll += delegate { PositionArrivalEditor(); };
+                boatGrid = grid; grid.ReadOnly = false; grid.EditMode = DataGridViewEditMode.EditOnEnter;
+                grid.CellBeginEdit += NumberBeginEdit; grid.CellEndEdit += NumberEndEdit;
+                grid.EditingControlShowing += NumberEditingControl;
+                grid.Scroll += delegate { PositionArrivalEditor(); };
                 grid.SizeChanged += delegate { PositionArrivalEditor(); };
                 grid.ColumnWidthChanged += delegate { PositionArrivalEditor(); };
             }
@@ -261,6 +473,7 @@ namespace CoastNotebook
             MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes; }
         void ShowTools(object sender, EventArgs e)
         {
+            if (macroEngine.Mode != MacroMode.Idle) return;
             if (toolsMenu.Items.Count == 0)
             {
                 toolsMenu.Items.Add("환경설정", null, Configure); toolsMenu.Items.Add("CSV 재시도", null, RetryCsv);
@@ -359,10 +572,10 @@ namespace CoastNotebook
             targetTitle.Text = "식별표적 입력"; cancelEdit.Visible = false; note.Visible = false; targetCard.RowStyles[noteRow].Height = 0;
             TableLayoutPanel heading = (TableLayoutPanel)targetCard.GetControlFromPosition(0, 0);
             heading.ColumnStyles[3].SizeType = SizeType.Absolute; heading.ColumnStyles[3].Width = 0;
-            loading = false; dirty = false;
+            loading = false; dirty = false; targetTimeManual = false; targetDatePinned = false;
         }
         void ResetBoat()
-        { bool before = loading; loading = true; boatDay.Value = DateTime.Today; boatTime.Value = MinuteNow(); vesselName.Text = ""; vesselNumber.Text = ""; loading = before; boatDirty = false; }
+        { bool before = loading; loading = true; boatDay.Value = DateTime.Today; boatTime.Value = MinuteNow(); vesselName.Text = ""; vesselNumber.Text = ""; loading = before; boatDirty = false; boatTimeManual = false; boatDatePinned = false; }
         Entry Find(Book source, string id) { return source.Entries.Find(delegate(Entry entry) { return entry.Id == id; }); }
         void Persist(Book next) { Data.Save(dataPath, next); book = next; }
         bool StoreEntry(Entry value, string message)
@@ -373,7 +586,7 @@ namespace CoastNotebook
                 if (old != null) { Data.Queue(next, old.Time); next.Entries.Remove(old); }
                 next.Entries.Add(value); Data.Queue(next, value.Time);
                 Book before = Data.Clone(book); Persist(next); undoBefore = before; undoButton.Enabled = true;
-                selected = value.Id; if (value.Id == arrivalId) CloseArrival(); SyncCsv(); RefreshRecords(); status.Text = message + (exportError.Length == 0 ? " · CSV 정상" : " · CSV 갱신 대기"); return true;
+                selected = value.Id; if (value.Id == arrivalId && !savingNumber) CloseArrival(); SyncCsv(); RefreshRecords(); status.Text = message + (exportError.Length == 0 ? " · CSV 정상" : " · CSV 갱신 대기"); return true;
             }
             catch (Exception ex) { status.Text = "원본 저장 실패 · 입력 유지"; Error(ex); return false; }
         }
@@ -432,7 +645,7 @@ namespace CoastNotebook
         {
             if (peopleGrid == null || boatGrid == null) return;
             FillGrid(peopleGrid, false, peopleAll.Checked || peopleActive.Checked, peopleAll.Checked || peopleDone.Checked);
-            FillGrid(boatGrid, true, boatAll.Checked || boatActive.Checked, boatAll.Checked || boatDone.Checked);
+            if (!boatGrid.IsCurrentCellInEditMode) FillGrid(boatGrid, true, boatAll.Checked || boatActive.Checked, boatAll.Checked || boatDone.Checked);
             int people = 0, boats = 0, arrivals = 0; SortedDictionary<string, int> counts = new SortedDictionary<string, int>();
             foreach (Entry entry in book.Entries)
             {
@@ -466,7 +679,7 @@ namespace CoastNotebook
                 {
                     int index;
                     if (vessel) index = grid.Rows.Add(entry.Time.ToString("HH:mm") + (entry.FinishedAt.HasValue ? "\n입항 " + entry.FinishedAt.Value.ToString("HH:mm") : ""),
-                        entry.VesselNumber, entry.VesselType, entry.VesselName.Length == 0 ? "미기재" : entry.VesselName, entry.StateText(), entry.ArrivalPlace());
+                        NumberValue(entry), entry.VesselType, entry.VesselName.Length == 0 ? "미기재" : entry.VesselName, entry.StateText(), entry.ArrivalPlace());
                     else index = grid.Rows.Add(entry.Time.ToString("HH:mm") + "\n" + entry.StateText(),
                         (entry.Title.Length == 0 ? "지형지물 생략" : entry.Title) + (entry.Azimuth.HasValue ? "\nP " + entry.Azimuth : "")
                         + (entry.Elevation.HasValue ? " T " + entry.Elevation : ""), entry.Describe(),
@@ -474,6 +687,7 @@ namespace CoastNotebook
                     DataGridViewRow row = grid.Rows[index]; row.Tag = entry;
                     row.MinimumHeight = vessel && !entry.FinishedAt.HasValue ? 27 : 42;
                     foreach (DataGridViewCell cell in row.Cells) cell.ToolTipText = entry.Report() + "\n" + entry.Note;
+                    if (vessel && numberDrafts.ContainsKey(entry.Id)) row.Cells["c1"].Style.BackColor = Color.FromArgb(100, 70, 15);
                     if (entry.Complete) { row.DefaultCellStyle.ForeColor = CoastStyle.Muted; row.DefaultCellStyle.BackColor = Color.FromArgb(22, 30, 38); }
                     if (entry.Id == selected)
                     {
@@ -493,6 +707,7 @@ namespace CoastNotebook
             DataGridView grid = (DataGridView)sender; if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
             Entry entry = grid.Rows[e.RowIndex].Tag as Entry; if (entry == null) return;
             string column = grid.Columns[e.ColumnIndex].Name;
+            if (grid == boatGrid && column == "c1") { selected = entry.Id; return; }
             if (entry.Id == selected && column == "action" && !entry.Complete) { FinishSelected(null, EventArgs.Empty); return; }
             if (entry.Id == selected && column == "menu") { ShowRecordMenu(grid, entry, grid.PointToClient(Cursor.Position)); return; }
             if (entry.Category != "Vessel" && entry.Id != editing)
@@ -503,7 +718,8 @@ namespace CoastNotebook
         void GridMouseDown(object sender, DataGridViewCellMouseEventArgs e)
         {
             if (e.Button != MouseButtons.Right || e.RowIndex < 0) return;
-            DataGridView grid = (DataGridView)sender; Entry entry = grid.Rows[e.RowIndex].Tag as Entry;
+            DataGridView grid = (DataGridView)sender; if (grid.IsCurrentCellInEditMode) grid.EndEdit();
+            Entry entry = grid.Rows[e.RowIndex].Tag as Entry;
             if (entry != null) { selected = entry.Id; RefreshRecords(); ShowRecordMenu(grid, entry, grid.PointToClient(Cursor.Position)); }
         }
         void ShowRecordMenu(Control owner, Entry entry, Point at)
@@ -627,6 +843,7 @@ namespace CoastNotebook
         }
         bool CanChangeSelected()
         {
+            if (numberDrafts.ContainsKey(selected)) { status.Text = "식별번호 입력을 먼저 저장하거나 ESC로 취소하세요."; return false; }
             if (selected == editing && dirty) { status.Text = "이 기록의 입력을 먼저 저장하거나 수정을 취소하세요."; return false; }
             return true;
         }
@@ -658,6 +875,7 @@ namespace CoastNotebook
         { try { Clipboard.SetText(entry.Report()); status.Text = "저장된 보고문을 복사했습니다."; } catch (Exception ex) { status.Text = "원본 보존 · 복사 실패: " + ex.Message; } }
         void UndoLast(object sender, EventArgs e)
         {
+            if (boatGrid.IsCurrentCellInEditMode || numberDrafts.Count > 0) { status.Text = "식별번호 입력을 먼저 확정하거나 취소하세요."; return; }
             if (undoBefore == null || !Discard()) return;
             try
             {
@@ -672,7 +890,7 @@ namespace CoastNotebook
         void Configure(object sender, EventArgs e)
         {
             if (busy) return;
-            try { if (ConfigureCore()) { LoadKinds(); UpdateBrand(); RefreshRecords(); SyncCsv(); } }
+            try { if (ConfigureCore()) { LoadKinds(); UpdateBrand(); RefreshRecords(); SyncCsv(); UpdateMacroUi(); } }
             catch (Exception ex) { Error(ex); }
         }
         bool ConfigureCore()
@@ -860,47 +1078,41 @@ namespace CoastNotebook
         bool EnsureDay(bool force)
         {
             DateTime today = DateTime.Now.Date;
-            if (book.AcknowledgedDate == today) { editor.Enabled = true; return true; }
-            if (!force && promptedDate == today) return false;
-            promptedDate = today; editor.Enabled = false; busy = true;
+            if (book.AcknowledgedDate == today) { if (macroEngine.Mode == MacroMode.Idle) editor.Enabled = true; return true; }
             try
             {
-                MessageBox.Show(this, "날짜가 " + Data.Day(today) + "입니다.\r\n"
-                    + "기존 기록은 복제하지 않고 보존합니다. 입력 중인 내용과 일시는 그대로 유지됩니다. 날짜가 지난 입력은 시각과 날짜를 확인하세요.\r\n"
-                    + "과거 기록은 [기록 조회]에서 조회하세요.", "날짜 확인");
                 Book next = Data.Clone(book); next.AcknowledgedDate = today;
                 next.AlarmAcknowledgements.RemoveAll(delegate(string key) { return !key.StartsWith(Data.Day(today) + "|", StringComparison.Ordinal); });
                 Persist(next); editor.Enabled = true; RefreshRecords(); return true;
             }
-            catch (Exception ex) { status.Text = "날짜 확인 저장 실패 / 입력 잠김 / 날짜 확인 버튼으로 재시도"; Error(ex); return false; }
-            finally { busy = false; }
+            catch (Exception ex) { status.Text = "날짜 확인 저장 실패 · 입력 보존"; if (force) Error(ex); return false; }
         }
         void Tick(object sender, EventArgs e)
         {
-            if (busy || ContainsModal()) return;
+            AdvanceClock(DateTime.Now);
+            if (busy || ContainsModal() || macroEngine.Mode != MacroMode.Idle) return;
             if (!EnsureDay(false)) return;
             try
             {
-                DateTime now = DateTime.Now; List<string> due = new List<string>(); List<string> keys = new List<string>();
-                foreach (string[] alarm in ConfigDialog.ParseAlarms(book.Settings.Alarms))
-                {
-                    string key = Data.Day(now) + "|" + alarm[0] + "|" + alarm[1];
-                    DateTime at = now.Date.Add(TimeSpan.ParseExact(alarm[0], @"hh\:mm", CultureInfo.InvariantCulture));
-                    if (now >= at && !book.AlarmAcknowledgements.Contains(key))
-                    { due.Add(alarm[0] + " " + alarm[1]); keys.Add(key); }
-                }
-                if (due.Count == 0) return;
-                busy = true;
-                MessageBox.Show(this, "확인하지 않은 금일 일반 일정입니다.\r\n" + String.Join("\r\n", due.ToArray()), "일정 알림");
-                Book next = Data.Clone(book); next.AlarmAcknowledgements.AddRange(keys); Persist(next);
+                List<SolarAlarm> due = Data.DueSolar(book, DateTime.Now); if (due.Count == 0) return;
+                busy = true; List<string> lines = new List<string>();
+                foreach (SolarAlarm alarm in due) lines.Add(alarm.Title + " · 예정 " + alarm.At.ToString("MM-dd HH:mm"));
+                System.Media.SystemSounds.Exclamation.Play();
+                MessageBox.Show(this, String.Join("\r\n", lines.ToArray()), "주야간 교대 알림");
+                Book next = Data.Clone(book); foreach (SolarAlarm alarm in due) next.AlarmAcknowledgements.Add(alarm.Key); Persist(next);
             }
-            catch (Exception ex) { Error(ex); }
+            catch (Exception ex) { status.Text = "기상 알림 확인: " + ex.Message; }
             finally { busy = false; }
         }
         bool ContainsModal() { foreach (Form form in Application.OpenForms) if (form != this && form.Modal) return true; return false; }
         void ConfirmClosing(object sender, FormClosingEventArgs e)
         {
+            if (macroEngine.Mode != MacroMode.Idle || macroEngine.RecordingFinished) StopMacro(false);
             if (busy) { e.Cancel = true; return; }
+            if (boatGrid.IsCurrentCellInEditMode) boatGrid.EndEdit();
+            foreach (KeyValuePair<string, string> draft in new Dictionary<string, string>(numberDrafts)) SaveNumberDraft(draft.Key, draft.Value);
+            if (numberDrafts.Count > 0 && MessageBox.Show(this, "저장하지 못한 식별번호 입력을 버리고 종료합니까?", "입력 확인",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) { e.Cancel = true; return; }
             if (!closing && !Discard()) { e.Cancel = true; return; }
             if (!closing && boatDirty && MessageBox.Show(this, "저장하지 않은 선박 입력을 버리고 종료합니까?", "입력 확인",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) e.Cancel = true;

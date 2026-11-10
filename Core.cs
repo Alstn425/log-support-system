@@ -117,6 +117,109 @@ namespace CoastNotebook
         }
     }
 
+    public class SolarSettings
+    {
+        public DateTime Date = DateTime.Today;
+        public string Bmnt = "", Sunrise = "", Sunset = "", Eent = "";
+        public bool Enabled;
+        public int SunriseOffset, SunsetOffset;
+    }
+    public class SolarAlarm
+    {
+        public string Key, Title;
+        public DateTime At;
+    }
+    public class MacroStep
+    {
+        public int X, Y;
+        public int DelayMs = 500;
+    }
+    public class MacroProfile
+    {
+        public string Name = "";
+        public int DefaultDelayMs = 500;
+        public int Left, Top, Width, Height;
+        public List<MacroStep> Steps = new List<MacroStep>();
+    }
+    public interface IMacroInput
+    {
+        bool Available { get; }
+        bool LeftDown { get; }
+        bool EscapeDown { get; }
+        int X { get; }
+        int Y { get; }
+        int DesktopLeft { get; }
+        int DesktopTop { get; }
+        int DesktopWidth { get; }
+        int DesktopHeight { get; }
+        bool Contains(int x, int y);
+        void Click(int x, int y);
+    }
+    public enum MacroMode { Idle, Recording, Playing }
+    public class MacroEngine
+    {
+        readonly IMacroInput input;
+        bool wasDown;
+        long lastClick, due;
+        int index;
+        public MacroProfile Profile;
+        public MacroMode Mode { get; private set; }
+        public bool RecordingFinished { get; private set; }
+        public string Status = "";
+        public Func<int, int, bool> AllowRecording;
+        public bool Available { get { return input.Available; } }
+        public bool EscapeHeld { get { return input.Available && input.EscapeDown; } }
+        public MacroEngine(IMacroInput source) { input = source; }
+        void RequireInput() { if (!input.Available) throw new PlatformNotSupportedException("실제 매크로 녹화·재생은 Windows에서 지원합니다."); }
+        public void StartRecording(string name, int defaultDelay, long now)
+        {
+            RequireInput(); if (Mode != MacroMode.Idle) throw new InvalidOperationException("진행 중인 매크로를 먼저 중지하세요.");
+            Profile = new MacroProfile { Name = name, DefaultDelayMs = defaultDelay, Left = input.DesktopLeft, Top = input.DesktopTop,
+                Width = input.DesktopWidth, Height = input.DesktopHeight };
+            Data.ValidateMacro(Profile); wasDown = input.LeftDown; lastClick = now; RecordingFinished = false;
+            Mode = MacroMode.Recording; Status = "녹화 중 · ESC/중지로 완료";
+        }
+        public void StartPlaying(MacroProfile profile, long now)
+        {
+            RequireInput(); if (Mode != MacroMode.Idle) throw new InvalidOperationException("진행 중인 매크로를 먼저 중지하세요.");
+            Data.ValidateMacro(profile); if (profile.Steps.Count == 0) throw new InvalidOperationException("먼저 이 슬롯에 클릭을 녹화하세요.");
+            if (profile.Width > 0 && (profile.Left != input.DesktopLeft || profile.Top != input.DesktopTop
+                || profile.Width != input.DesktopWidth || profile.Height != input.DesktopHeight))
+                throw new InvalidOperationException("녹화 당시와 화면 해상도·배치가 다릅니다. 현재 화면에서 다시 녹화하세요.");
+            foreach (MacroStep step in profile.Steps)
+                if (!input.Contains(step.X, step.Y)) throw new InvalidOperationException("화면 밖의 클릭 좌표가 있습니다.");
+            Profile = Data.CloneMacro(profile); index = 0; due = now; RecordingFinished = false;
+            Mode = MacroMode.Playing; Status = "재생 중";
+        }
+        public void Tick(long now)
+        {
+            if (Mode == MacroMode.Idle) return;
+            if (input.EscapeDown) { Stop(true); return; }
+            if (Mode == MacroMode.Recording)
+            {
+                bool down = input.LeftDown;
+                if (down && !wasDown && (AllowRecording == null || AllowRecording(input.X, input.Y)))
+                {
+                    if (Profile.Steps.Count >= 1000) { Stop(true); Status = "1000개 클릭 녹화를 완료했습니다."; return; }
+                    if (Profile.Steps.Count > 0) Profile.Steps[Profile.Steps.Count - 1].DelayMs = (int)Math.Min(600000L, Math.Max(0, now - lastClick));
+                    Profile.Steps.Add(new MacroStep { X = input.X, Y = input.Y, DelayMs = Profile.DefaultDelayMs }); lastClick = now;
+                    Status = "녹화 중 · " + Profile.Steps.Count + "개 클릭 · ESC로 완료";
+                }
+                wasDown = down; return;
+            }
+            if (now < due) return;
+            if (index >= Profile.Steps.Count) { Mode = MacroMode.Idle; Status = "매크로 재생 완료"; return; }
+            MacroStep next = Profile.Steps[index]; input.Click(next.X, next.Y); index++;
+            due = now + next.DelayMs; Status = "재생 중 · " + index + "/" + Profile.Steps.Count;
+        }
+        public void Stop(bool keepRecording)
+        {
+            RecordingFinished = Mode == MacroMode.Recording && keepRecording;
+            Mode = MacroMode.Idle; Status = RecordingFinished ? "녹화 완료 · 저장할 내용을 확인하세요." : "매크로 중지";
+        }
+        public void ConsumeRecording() { RecordingFinished = false; }
+    }
+
     public class Settings
     {
         public bool Configured;
@@ -129,13 +232,17 @@ namespace CoastNotebook
         public string Alarms = "";
         public string Cameras = "";
         public string Places = "";
+        public bool StructuredCameras;
+        public List<CameraSpec> CameraDefinitions = new List<CameraSpec>();
+        public SolarSettings Solar = new SolarSettings();
+        public MacroProfile[] Macros = new MacroProfile[] { new MacroProfile { Name = "매크로 1" }, new MacroProfile { Name = "매크로 2" } };
         public string Harbors = "";
         public string VesselTypes = "어선\r\n레저보트\r\n기타";
     }
 
     public class Book
     {
-        public int Version = 4;
+        public int Version = 5;
         public Settings Settings = new Settings();
         public List<Entry> Entries = new List<Entry>();
         public List<string> PendingDays = new List<string>();
@@ -152,7 +259,7 @@ namespace CoastNotebook
 
     public static class Data
     {
-        public const int CurrentVersion = 4;
+        public const int CurrentVersion = 5;
         static readonly XmlSerializer Serializer = new XmlSerializer(typeof(Book));
 
         public static List<string> Lines(string text)
@@ -166,6 +273,25 @@ namespace CoastNotebook
         public static List<CameraSpec> Cameras(Settings settings)
         {
             List<CameraSpec> result = new List<CameraSpec>();
+            if (settings.StructuredCameras)
+            {
+                HashSet<string> unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (settings.CameraDefinitions == null) throw new FormatException("카메라 설정을 확인하세요.");
+                foreach (CameraSpec camera in settings.CameraDefinitions)
+                {
+                    if (camera == null || String.IsNullOrWhiteSpace(camera.Name) || !unique.Add(camera.Name.Trim()) || camera.Places == null)
+                        throw new FormatException("카메라 이름은 비어 있거나 중복될 수 없습니다.");
+                    CameraSpec copy = new CameraSpec(); copy.Name = camera.Name.Trim();
+                    HashSet<string> places = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string place in camera.Places)
+                    {
+                        if (String.IsNullOrWhiteSpace(place) || !places.Add(place.Trim())) throw new FormatException("지형지물 이름은 비어 있거나 중복될 수 없습니다.");
+                        copy.Places.Add(place.Trim());
+                    }
+                    result.Add(copy);
+                }
+                return result;
+            }
             HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string line in Lines(settings.Cameras))
             {
@@ -177,6 +303,52 @@ namespace CoastNotebook
                 spec.Places.AddRange(Lines(places)); result.Add(spec);
             }
             return result;
+        }
+
+        public static MacroProfile CloneMacro(MacroProfile source)
+        {
+            MacroProfile copy = new MacroProfile { Name = source.Name, DefaultDelayMs = source.DefaultDelayMs,
+                Left = source.Left, Top = source.Top, Width = source.Width, Height = source.Height };
+            foreach (MacroStep step in source.Steps) copy.Steps.Add(new MacroStep { X = step.X, Y = step.Y, DelayMs = step.DelayMs });
+            return copy;
+        }
+        public static void ValidateMacro(MacroProfile profile)
+        {
+            if (profile == null || profile.Name == null || profile.Steps == null || profile.Steps.Count > 1000
+                || profile.DefaultDelayMs < 0 || profile.DefaultDelayMs > 600000 || profile.Width < 0 || profile.Height < 0)
+                throw new FormatException("매크로 이름·클릭 수·기본 지연을 확인하세요.");
+            foreach (MacroStep step in profile.Steps)
+                if (step == null || step.DelayMs < 0 || step.DelayMs > 600000) throw new FormatException("클릭 지연은 0~600000ms 범위입니다.");
+        }
+        public static void ValidateSolar(SolarSettings solar)
+        {
+            if (solar == null || solar.Date.Year < 1753 || solar.Date.Year > 9998 || Math.Abs((long)solar.SunriseOffset) > 720 || Math.Abs((long)solar.SunsetOffset) > 720)
+                throw new FormatException("기상 적용 날짜와 ±분 범위(-720~720)를 확인하세요.");
+            foreach (string text in new string[] { solar.Bmnt, solar.Sunrise, solar.Sunset, solar.Eent })
+                if (text == null || (text.Length > 0 && !ValidTime(text))) throw new FormatException("기상 시각은 HH:mm 형식입니다.");
+            if (solar.Enabled && (solar.Sunrise.Length == 0 || solar.Sunset.Length == 0))
+                throw new FormatException("교대 알람을 사용하려면 일출·일몰 시각을 입력하세요.");
+        }
+        public static bool ValidTime(string value)
+        { DateTime parsed; return DateTime.TryParseExact(value, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed); }
+        public static List<SolarAlarm> SolarAlarms(SolarSettings solar)
+        {
+            ValidateSolar(solar); List<SolarAlarm> result = new List<SolarAlarm>(); if (!solar.Enabled) return result;
+            string[] times = { solar.Sunrise, solar.Sunset }; string[] names = { "일출 · 주간 전환", "일몰 · 야간 전환" };
+            int[] offsets = { solar.SunriseOffset, solar.SunsetOffset };
+            for (int i = 0; i < 2; i++)
+            {
+                DateTime at = solar.Date.Date.Add(DateTime.ParseExact(times[i], "HH:mm", CultureInfo.InvariantCulture).TimeOfDay).AddMinutes(offsets[i]);
+                result.Add(new SolarAlarm { Title = names[i], At = at, Key = Day(at) + "|solar|" + Day(solar.Date) + "|" + i + "|" + times[i] + "|" + offsets[i] });
+            }
+            return result;
+        }
+        public static List<SolarAlarm> DueSolar(Book book, DateTime now)
+        {
+            List<SolarAlarm> due = new List<SolarAlarm>();
+            foreach (SolarAlarm alarm in SolarAlarms(book.Settings.Solar))
+                if (alarm.At.Date == now.Date && now >= alarm.At && !book.AlarmAcknowledgements.Contains(alarm.Key)) due.Add(alarm);
+            return due;
         }
 
         public static int? OptionalAngle(string text, int min, int max)
@@ -292,6 +464,9 @@ namespace CoastNotebook
                 || book.Entries == null || book.PendingDays == null
                 || book.AlarmAcknowledgements == null)
                 throw new InvalidDataException("지원하지 않거나 손상된 원본입니다.");
+            if (book.Settings.Macros == null || book.Settings.Macros.Length != 2) throw new InvalidDataException("매크로 슬롯은 2개여야 합니다.");
+            foreach (MacroProfile macro in book.Settings.Macros) ValidateMacro(macro);
+            ValidateSolar(book.Settings.Solar);
             HashSet<string> ids = new HashSet<string>();
             foreach (Entry entry in book.Entries)
             {

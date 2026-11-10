@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Collections.Generic;
@@ -56,6 +56,7 @@ class Regression
             DomainTests();
             MockDomainTests();
             ReviewDomainTests();
+            SettingsAndMacroTests();
             if (args.Length > 1 && args[1] == "--ui") UiTests();
             Console.WriteLine("TOTAL PASSED: " + passed); return 0;
         }
@@ -275,11 +276,12 @@ class Regression
             {
                 config.Show(form); Application.DoEvents();
                 Call(config, "Save", null, EventArgs.Empty);
-                Check(config.Value.Cameras == Current(form).Settings.Cameras && config.Value.Harbors == "북항\n남항"
+                Check(config.Value != null && Data.Cameras(config.Value)[0].Name == "카메라 A" && Data.Lines(config.Value.Harbors)[0] == "북항"
                     && config.Value.Kinds[0].Id == "kind", "settings preserve camera associations, harbor order and kind IDs");
                 config.Close();
             }
             ReviewUiTests(form, path, departureId);
+            NewUiTests(form, departureId);
             using (HistoryDialog history = new HistoryDialog(Current(form), false))
             {
                 history.Show(form); Application.DoEvents();
@@ -472,6 +474,152 @@ class Regression
         Book old = Data.Load(legacy); Check(old.Entries[1].ArrivalPlace() == "A항", "old same-harbor arrival remains readable");
         Data.Save(legacy, old); Check(Data.Load(legacy).Version == Data.CurrentVersion && Directory.GetFiles(root, "v3.xml.v3-*.bak").Length == 1,
             "v3 source backed up before arrival-port upgrade");
+    }
+
+    class FakeMacroInput : IMacroInput
+    {
+        public bool Available { get; set; }
+        public bool LeftDown { get; set; }
+        public bool EscapeDown { get; set; }
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int DesktopLeft { get; set; }
+        public int DesktopTop { get; set; }
+        public int DesktopWidth { get; set; }
+        public int DesktopHeight { get; set; }
+        public List<Point> Clicks = new List<Point>();
+        public bool FailClick;
+        public FakeMacroInput() { Available = true; DesktopLeft = -200; DesktopWidth = 1200; DesktopHeight = 800; }
+        public bool Contains(int x, int y) { return new Rectangle(DesktopLeft, DesktopTop, DesktopWidth, DesktopHeight).Contains(x, y); }
+        public void Click(int x, int y) { if (FailClick) throw new IOException("simulated input failure"); Clicks.Add(new Point(x, y)); }
+    }
+    static void SettingsAndMacroTests()
+    {
+        Book b = MakeBook(); SolarSettings solar = b.Settings.Solar;
+        solar.Date = DateTime.Today; solar.Bmnt = "05:00"; solar.Sunrise = "06:00"; solar.Sunset = "18:00"; solar.Eent = "19:00";
+        solar.Enabled = true; solar.SunriseOffset = -10; solar.SunsetOffset = 20;
+        Check(Data.DueSolar(b, DateTime.Today.AddHours(5).AddMinutes(49)).Count == 0, "solar alarm waits until configured offset");
+        List<SolarAlarm> due = Data.DueSolar(b, DateTime.Today.AddHours(5).AddMinutes(50));
+        Check(due.Count == 1 && due[0].At.Hour == 5 && due[0].At.Minute == 50, "sunrise offset produces due alarm");
+        b.AlarmAcknowledgements.Add(due[0].Key);
+        Check(Data.DueSolar(b, DateTime.Today.AddHours(7)).Count == 0, "acknowledged solar alarm does not repeat");
+        Check(Data.DueSolar(b, DateTime.Today.AddHours(18).AddMinutes(20)).Count == 1, "sunset alarm has independent acknowledgment");
+        solar.Date = DateTime.Today.AddDays(-1);
+        Check(Data.DueSolar(b, DateTime.Today.AddHours(20)).Count == 0, "previous day solar times are not reused as today's times");
+        solar.Sunset = "23:30"; solar.SunsetOffset = 60;
+        Check(Data.DueSolar(b, DateTime.Today.AddHours(1)).Count == 1, "solar offset crossing midnight uses actual alarm date");
+        solar.SunriseOffset = 721; Reject(delegate { Data.ValidateSolar(solar); }, "solar offset bounds validated");
+        solar.SunriseOffset = 0; solar.Sunrise = "25:00"; Reject(delegate { Data.ValidateSolar(solar); }, "invalid solar clock rejected");
+        solar.Enabled = false; solar.Sunrise = "06:00";
+        Check(Data.SolarAlarms(solar).Count == 0 && solar.Bmnt == "05:00" && solar.Eent == "19:00", "disabled alarms retain all four reference times");
+        b.Settings.StructuredCameras = true; b.Settings.Cameras = "obsolete|not used"; b.Settings.Places = "obsolete shared";
+        b.Settings.CameraDefinitions.Add(new CameraSpec { Name = "카메라 A|동측", Places = new List<string> { "방파제, 남단", "해변" } });
+        Check(Data.Cameras(b.Settings)[0].Places[0] == "방파제, 남단", "structured cameras do not require delimiter syntax");
+        FakeMacroInput input = new FakeMacroInput(); MacroEngine engine = new MacroEngine(input);
+        input.LeftDown = true; engine.StartRecording("슬롯 1", 500, 0); engine.Tick(10);
+        Check(engine.Profile.Steps.Count == 0, "held record-start click is not recorded");
+        input.LeftDown = false; engine.Tick(20); input.X = -100; input.Y = 100; input.LeftDown = true; engine.Tick(100); engine.Tick(120);
+        Check(engine.Profile.Steps.Count == 1 && engine.Profile.Steps[0].X == -100, "one point per press with multi-monitor negative coordinates");
+        input.LeftDown = false; engine.Tick(140); input.X = 200; input.Y = 300; input.LeftDown = true; engine.Tick(400);
+        input.EscapeDown = true; engine.Tick(420);
+        Check(engine.Mode == MacroMode.Idle && engine.RecordingFinished && engine.EscapeHeld && engine.Profile.Steps[0].DelayMs == 300,
+            "ESC ends recording and measured click interval is retained");
+        input.EscapeDown = false; input.LeftDown = false;
+        MacroProfile recorded = Data.CloneMacro(engine.Profile); engine.ConsumeRecording();
+        b.Settings.Macros[0] = recorded;
+        b.Settings.Macros[1] = new MacroProfile { Name = "슬롯 2", Steps = new List<MacroStep> { new MacroStep { X = 500, Y = 100, DelayMs = 0 } } };
+        string path = Path.Combine(root, "macro-settings.xml"); Data.Save(path, b); Book read = Data.Load(path);
+        Check(read.Settings.Macros.Length == 2 && read.Settings.Macros[0].Steps.Count == 2 && read.Settings.Macros[1].Steps.Count == 1,
+            "both macro slots survive XML roundtrip without collection duplication");
+        Check(Data.Cameras(read.Settings)[0].Name == "카메라 A|동측" && Data.Cameras(read.Settings)[0].Places[0] == "방파제, 남단",
+            "camera names and landmarks survive structured XML roundtrip");
+        MacroProfile copy = Data.CloneMacro(recorded); copy.Steps[0].X = 999;
+        Check(recorded.Steps[0].X == -100, "macro editor copy cannot mutate stored slot");
+        engine.StartPlaying(recorded, 0); engine.Tick(0); engine.Tick(299);
+        Check(input.Clicks.Count == 1, "playback waits between clicks");
+        engine.Tick(300); Check(input.Clicks.Count == 2 && input.Clicks[1] == new Point(200, 300), "playback executes recorded click order at due time");
+        engine.Tick(799); Check(engine.Mode == MacroMode.Playing, "last configured delay is respected"); engine.Tick(800);
+        Check(engine.Mode == MacroMode.Idle, "playback completes without blocking thread sleeps");
+        input.Clicks.Clear(); engine.StartPlaying(b.Settings.Macros[1], 1000); engine.Tick(1000); engine.Tick(1001);
+        Check(input.Clicks.Count == 1 && input.Clicks[0].X == 500, "second slot plays independently");
+        engine.StartPlaying(recorded, 0); engine.Tick(0); input.EscapeDown = true; engine.Tick(10); input.EscapeDown = false; engine.Tick(10000);
+        Check(engine.Mode == MacroMode.Idle && input.Clicks.Count == 2, "ESC cancels playback before later clicks");
+        input.DesktopWidth = 800; Reject(delegate { engine.StartPlaying(recorded, 0); }, "changed desktop layout rejected before playback"); input.DesktopWidth = 1200;
+        MacroProfile invalid = new MacroProfile { Steps = new List<MacroStep> { new MacroStep { X = 99999, Y = 0 } } };
+        Reject(delegate { engine.StartPlaying(invalid, 0); }, "offscreen macro point rejected");
+        invalid.Steps[0].DelayMs = -1; Reject(delegate { Data.ValidateMacro(invalid); }, "negative delay rejected");
+        input.FailClick = true; engine.StartPlaying(recorded, 0); Reject(delegate { engine.Tick(0); }, "input injection failure is surfaced"); engine.Stop(false);
+        input.FailClick = false; input.Available = false; Reject(delegate { engine.StartRecording("", 500, 0); }, "unsupported native recording fails clearly");
+    }
+
+    static void NewUiTests(MainForm form, string departureId)
+    {
+        Call(form, "ResetEditor"); Call(form, "ResetBoat");
+        DateTime now = DateTime.Today.AddHours(12).AddMinutes(20);
+        Call(form, "AdvanceClock", now);
+        Check(Field<DateTimePicker>(form, "date").Value.Hour == 12 && Field<DateTimePicker>(form, "date").Value.Minute == 20,
+            "untouched new-entry time follows live clock");
+        Field<DateTimePicker>(form, "date").Value = now.AddHours(-1); Call(form, "AdvanceClock", now.AddMinutes(5));
+        Check(Field<DateTimePicker>(form, "date").Value.Hour == 11, "manual time is preserved during live refresh");
+        Call(form, "SetCurrentTime", false, now.AddMinutes(5));
+        Check(Field<DateTimePicker>(form, "date").Value.Minute == 25, "current-time action replaces manually edited time");
+        Call(form, "ResetEditor"); Call(form, "ResetBoat");
+        Field<TextBox>(form, "note").Text = "draft survives midnight"; int count = Current(form).Entries.Count;
+        Call(form, "AdvanceClock", DateTime.Today.AddDays(1));
+        Check(Field<DateTimePicker>(form, "targetDay").Value.Date == DateTime.Today.AddDays(1)
+            && Field<DateTimePicker>(form, "boatDay").Value.Date == DateTime.Today.AddDays(1)
+            && Field<TextBox>(form, "note").Text == "draft survives midnight" && Current(form).Entries.Count == count,
+            "midnight advances new dates without cloning records or losing draft");
+        Call(form, "ResetEditor"); Field<DateTimePicker>(form, "targetDay").Value = DateTime.Today.AddDays(-3);
+        Call(form, "AdvanceClock", DateTime.Today.AddDays(1));
+        Check(Field<DateTimePicker>(form, "targetDay").Value.Date == DateTime.Today.AddDays(-3), "explicit historical date stays pinned");
+        Call(form, "ResetEditor"); Call(form, "ResetBoat");
+        using (ConfigDialog config = new ConfigDialog(Current(form).Settings))
+        {
+            config.Show(form); Application.DoEvents();
+            Check(Field<TabControl>(config, "tabs").TabPages.Count == 5, "settings are separated into five clear tabs");
+            Check(config.GetType().GetField("places", BindingFlags.NonPublic | BindingFlags.Instance) == null, "no common-landmark input in settings");
+            List<CameraCardEditor> cards = Field<List<CameraCardEditor>>(config, "cameras");
+            cards[0].Places.AddValue("새 지형지물, 동측");
+            TextListEditor ports = Field<TextListEditor>(config, "harbors"); ports.MoveValue(ports.Inputs[0], 1);
+            Call(config, "Save", null, EventArgs.Empty);
+            Check(config.Value != null && config.Value.StructuredCameras && Data.Cameras(config.Value)[0].Places.Contains("새 지형지물, 동측")
+                && Data.Lines(config.Value.Harbors)[0] == "남항", "camera cards and reordered harbors save without text delimiters");
+            config.Close();
+        }
+        DataGridView grid = Field<DataGridView>(form, "boatGrid");
+        DataGridViewRow numberRow = null;
+        foreach (DataGridViewRow row in grid.Rows) if (row.Tag is Entry && ((Entry)row.Tag).Id == departureId) numberRow = row;
+        grid.CurrentCell = numberRow.Cells["c1"]; grid.BeginEdit(true); Application.DoEvents();
+        TextBox input = grid.EditingControl as TextBox;
+        Check(input != null, "vessel number cell enters text editing directly"); input.Text = "RADAR-18";
+        Call(form, "RefreshRecords"); Check(grid.IsCurrentCellInEditMode && ((TextBox)grid.EditingControl).Text == "RADAR-18",
+            "list refresh preserves active number edit");
+        grid.EndEdit(); Application.DoEvents();
+        Entry saved = Current(form).Entries.Find(delegate(Entry entry) { return entry.Id == departureId; });
+        Check(saved.VesselNumber == "RADAR-18", "inline vessel number persists without details dialog");
+        numberRow = null; foreach (DataGridViewRow row in grid.Rows) if (row.Tag is Entry && ((Entry)row.Tag).Id == departureId) numberRow = row;
+        grid.CurrentCell = numberRow.Cells["c1"]; grid.BeginEdit(true); Application.DoEvents(); input = (TextBox)grid.EditingControl; input.Text = "cancel this";
+        typeof(Control).GetMethod("OnKeyDown", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(input, new object[] { new KeyEventArgs(Keys.Escape) });
+        Application.DoEvents();
+        Check(Current(form).Entries.Find(delegate(Entry entry) { return entry.Id == departureId; }).VesselNumber == "RADAR-18", "ESC cancels inline number edit");
+        numberRow = null; foreach (DataGridViewRow row in grid.Rows) if (row.Tag is Entry && ((Entry)row.Tag).Id == departureId) numberRow = row;
+        grid.CurrentCell = numberRow.Cells["c1"]; grid.BeginEdit(true); Application.DoEvents(); ((TextBox)grid.EditingControl).Text = "RADAR-19";
+        FormClosingEventArgs close = new FormClosingEventArgs(CloseReason.UserClosing, false);
+        Call(form, "ConfirmClosing", null, close); Application.DoEvents();
+        Check(!close.Cancel && Current(form).Entries.Find(delegate(Entry entry) { return entry.Id == departureId; }).VesselNumber == "RADAR-19",
+            "closing commits an active vessel number edit before leaving");
+        using (MacroEditDialog dialog = new MacroEditDialog(new MacroProfile { Name = "slot", Steps = new List<MacroStep> {
+            new MacroStep { X = 10, Y = 20, DelayMs = 100 }, new MacroStep { X = 30, Y = 40, DelayMs = 200 } } }, 0))
+        {
+            dialog.Show(form); Application.DoEvents(); Field<NumericUpDown>(dialog, "delay").Value = 750;
+            FindButton(dialog, "전체에 적용").PerformClick(); Call(dialog, "Save", null, EventArgs.Empty);
+            Check(dialog.Value != null && dialog.Value.Steps[0].DelayMs == 750 && dialog.Value.Steps[1].DelayMs == 750,
+                "macro delay editor applies delay to each click"); dialog.Close();
+        }
+        Check(Field<Button>(form, "macroOne").Visible && Field<Button>(form, "macroTwo").Visible,
+            "both macro playback buttons are always visible");
+        Call(form, "ResetEditor"); Call(form, "ResetBoat");
     }
 
     static List<string[]> ReadCsv(string text)
